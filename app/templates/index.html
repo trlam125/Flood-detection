@@ -1,0 +1,160 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <link rel="icon" href="/static/favicon.svg" type="image/svg+xml" />
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>RIWA Flood Monitor</title>
+  <link rel="stylesheet" href="/static/style.css" />
+</head>
+<body>
+  <main class="page-shell">
+    <header class="topbar">
+      <div>
+        <div class="eyebrow">RIWA V2 · FIXED CAMERA</div>
+        <h1>Flood Monitor</h1>
+        <p>Automatic waterline detection with one-time camera calibration.</p>
+      </div>
+      <div id="modelBadge" class="model-badge">Checking model...</div>
+    </header>
+
+    <section class="workspace">
+      <aside class="setup-panel card">
+        <div class="section-head">
+          <div><span class="step">1</span><h2>Video</h2></div>
+        </div>
+
+        <label class="upload-box" id="uploadBox">
+          <input id="videoFile" type="file" accept="video/*" hidden />
+          <span class="upload-icon">+</span>
+          <span class="upload-copy"><strong>Choose video</strong><small>Fixed-camera MP4, MOV, AVI, MKV or M4V</small></span>
+        </label>
+        <div id="uploadStatus" class="helper"></div>
+        <div id="videoMeta" class="meta-strip hidden"></div>
+
+        <div class="divider"></div>
+
+        <div class="section-head compact-head">
+          <div><span class="step">2</span><h2>Camera setup</h2></div>
+          <span id="calibrationBadge" class="state-pill muted-pill">Not checked</span>
+        </div>
+        <p class="helper fixed-note">Calibrate once per fixed camera. After that, water level is detected automatically in every analyzed frame.</p>
+
+        <div class="profile-row">
+          <label>
+            Camera profile
+            <input id="profile" value="default" />
+          </label>
+          <button id="loadProfile" class="secondary">Check</button>
+        </div>
+
+        <div id="autoInfo" class="mode-note">No manual waterline selection is needed during analysis. The system detects the waterline from the RIWA mask automatically.</div>
+
+        <button id="toggleCalibration" class="secondary full-button">Set / update calibration</button>
+
+        <div id="manualPanel" class="hidden manual-panel">
+          <ol class="cal-steps">
+            <li>Click the <b>0 cm baseline</b> on the preview.</li>
+            <li>Click a second point above it with a known real-world vertical distance.</li>
+            <li>Enter that distance and save.</li>
+          </ol>
+          <label>
+            Reference distance (cm)
+            <input id="knownCm" type="number" min="0.1" step="0.1" value="100" />
+          </label>
+          <div class="button-row">
+            <button id="resetPoints" class="secondary">Reset points</button>
+            <button id="saveCalibration" class="primary">Save calibration</button>
+          </div>
+          <div id="calStatus" class="helper"></div>
+        </div>
+
+        <details class="advanced-settings">
+          <summary>Alert & processing settings</summary>
+          <div class="advanced-body">
+            <div class="settings-group">
+              <div class="settings-title">Real-world water level</div>
+              <div class="mini-grid">
+                <label>Warning (cm)<input id="warningCm" type="number" value="20" min="0" step="1" /></label>
+                <label>Danger (cm)<input id="dangerCm" type="number" value="50" min="0" step="1" /></label>
+              </div>
+            </div>
+            <div class="settings-group">
+              <div class="settings-title">Fallback when no calibration exists</div>
+              <div class="mini-grid">
+                <label>Warning area (%)<input id="warningRatioPct" type="number" value="20" min="0" max="100" step="1" /></label>
+                <label>Danger area (%)<input id="dangerRatioPct" type="number" value="45" min="0" max="100" step="1" /></label>
+              </div>
+            </div>
+            <label>Analyze every Nth frame<input id="sampleN" type="number" value="1" min="1" max="30" step="1" /></label>
+          </div>
+        </details>
+
+        <button id="analyzeBtn" class="primary analyze-button" disabled>Analyze video</button>
+
+        <div id="progressArea" class="hidden progress-area">
+          <div class="progress-head"><span id="progressText">Processing...</span><span id="progressPercent">0%</span></div>
+          <div class="progress-track"><div id="progressBar" class="progress-bar"></div></div>
+        </div>
+        <div id="analysisError" class="error hidden"></div>
+      </aside>
+
+      <section class="preview-panel card">
+        <div class="section-head preview-head">
+          <div><span class="step">PREVIEW</span><h2>Camera frame</h2></div>
+          <div id="pointStatus" class="state-pill muted-pill">Upload a video</div>
+        </div>
+        <div class="preview-wrap" id="previewWrap">
+          <img id="previewImage" alt="Video preview" class="hidden" />
+          <canvas id="calCanvas" class="hidden"></canvas>
+          <div id="previewPlaceholder" class="preview-placeholder">
+            <strong>No video yet</strong>
+            <span>Upload a fixed-camera flood video to begin.</span>
+          </div>
+        </div>
+        <div class="preview-legend">
+          <span><i class="legend-line yellow"></i>Automatic waterline</span>
+          <span><i class="legend-zone"></i>Calibration measurement zone</span>
+        </div>
+      </section>
+    </section>
+
+    <section id="resultSection" class="result-section card hidden">
+      <div class="result-header">
+        <div>
+          <div class="eyebrow">ANALYSIS RESULT</div>
+          <h2>Flood status</h2>
+          <p id="resultMeasurementHint" class="result-hint"></p>
+        </div>
+        <div id="statusBadge" class="status-badge">SAFE</div>
+      </div>
+
+      <div id="calibratedMetrics" class="primary-metrics hidden">
+        <div class="hero-metric"><span>Peak water level</span><strong id="maxLevel">-</strong></div>
+        <div class="hero-metric"><span>Mean water level</span><strong id="meanLevel">-</strong></div>
+      </div>
+
+      <div id="areaMetrics" class="primary-metrics hidden">
+        <div class="hero-metric"><span>Peak water area</span><strong id="maxRatio">-</strong></div>
+        <div class="hero-metric"><span>Mean water area</span><strong id="meanRatio">-</strong></div>
+      </div>
+
+      <div class="secondary-metrics">
+        <span id="measurementModeChip">Mode: -</span>
+        <span id="confidenceChip">Waterline confidence: -</span>
+        <span id="secondaryAreaChip">Water area: -</span>
+        <span id="modelThresholdChip">Model threshold: -</span>
+      </div>
+
+      <video id="resultVideo" controls playsinline preload="metadata"></video>
+
+      <details class="timeline-wrap">
+        <summary>Timeline details</summary>
+        <div id="timeline" class="timeline"></div>
+      </details>
+    </section>
+  </main>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>
