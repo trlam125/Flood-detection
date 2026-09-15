@@ -1,0 +1,51 @@
+# Python environments and caches
+.venv/
+venv/
+env/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.ipynb_checkpoints/
+
+# Python build and test artifacts
+build/
+dist/
+*.egg-info/
+.coverage
+.coverage.*
+htmlcov/
+
+# Local configuration and secrets
+.env
+.env.*
+!.env.example
+!.env.sample
+/instance/
+/ngrok.yml
+/ngrok.yaml
+
+# Runtime uploads, generated videos, and training results
+/uploads/
+/outputs/
+/runs/
+/Output Video.mp4
+
+# Downloaded local tool
+/ngrok.exe
+
+# Logs and temporary files
+*.log
+*.tmp
+*.temp
+*.swp
+*.swo
+*~
+
+# Editor and operating system files
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+Desktop.ini
