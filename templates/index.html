@@ -3,197 +3,178 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Flood Water Level Detection</title>
-  <style>
-    :root { color-scheme: dark; }
-    * { box-sizing: border-box; }
-    body { margin:0; font-family:Inter,Segoe UI,Arial,sans-serif; background:#0b1220; color:#e8eef9; }
-    .wrap { max-width:1120px; margin:0 auto; padding:28px 18px 48px; }
-    h1 { margin:0 0 8px; font-size:30px; }
-    .sub { color:#9dafc9; margin-bottom:24px; }
-    .grid { display:grid; grid-template-columns:390px 1fr; gap:22px; }
-    .card { background:#121b2d; border:1px solid #24324a; border-radius:16px; padding:20px; }
-    label { display:block; font-size:13px; color:#b7c5dc; margin:14px 0 7px; }
-    input { width:100%; padding:11px 12px; border-radius:9px; border:1px solid #35445f; background:#0d1627; color:white; }
-    input[type=file] { padding:9px; }
-    .check { display:flex; align-items:center; gap:8px; margin-top:14px; color:#d9e3f3; font-size:14px; }
-    .check input { width:auto; }
-    .thresholds { display:grid; grid-template-columns:repeat(3,1fr); gap:8px; }
-    button, .download { display:inline-block; margin-top:18px; width:100%; border:0; border-radius:10px; padding:12px 16px; background:#3b82f6; color:white; font-weight:700; cursor:pointer; text-decoration:none; text-align:center; }
-    button:disabled { opacity:.5; cursor:not-allowed; }
-    .warning { padding:10px 12px; border-radius:8px; background:#4a2d12; border:1px solid #85551d; color:#ffd59a; margin-bottom:14px; }
-    .status { min-height:24px; margin-bottom:12px; color:#cbd7ea; }
-    .progress { height:12px; border-radius:999px; overflow:hidden; background:#26334a; }
-    .bar { height:100%; width:0%; background:#3b82f6; transition:width .25s; }
-    video { width:100%; max-height:620px; background:black; border-radius:12px; margin-top:16px; }
-    .stats { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:10px; margin-top:16px; }
-    .stat { background:#0d1627; padding:12px; border-radius:10px; }
-    .stat b { display:block; font-size:20px; margin-top:4px; }
-    .hint { font-size:12px; color:#8295b3; line-height:1.5; }
-    .error { color:#ff9b9b; white-space:pre-wrap; }
-    .manual { opacity:.55; }
-    .manual.enabled { opacity:1; }
-    @media (max-width:820px) { .grid { grid-template-columns:1fr; } }
-  </style>
+  <title>Flood AI Monitor</title>
+  <link rel="stylesheet" href="/static/css/style.css">
 </head>
 <body>
-<div class="wrap">
-  <h1>Flood Water Level Detection</h1>
-  <div class="sub">YOLO segmentation · video upload · NORMAL / LOW / MEDIUM / HIGH</div>
+<header class="topbar">
+  <div class="brand">Flood AI Monitor</div>
+  <nav><a class="active" href="/">Phân tích</a><a href="/history">Lịch sử</a></nav>
+</header>
+<main class="container">
+  <section class="hero">
+    <div>
+      <span class="eyebrow">YOLOv8 Segmentation</span>
+      <h1>Phát hiện vùng nước và ước lượng mực nước từ ảnh/video</h1>
+      <p>Automatic dùng calibration đã lưu. Manual cho phép chỉnh đường đo, tỷ lệ pixel/mét và ngưỡng cảnh báo trước khi phân tích.</p>
+    </div>
+    <div class="model-pill {{ 'ok' if model_exists else 'bad' }}">{{ 'best.pt sẵn sàng' if model_exists else 'Thiếu best.pt' }}</div>
+  </section>
 
-  <div class="grid">
-    <div class="card">
-      {% if not model_exists %}
-      <div class="warning">Chưa tìm thấy <b>best.pt</b>. Hãy copy best.pt vào cùng thư mục với app.py.</div>
-      {% endif %}
-      <form id="form">
-        <label>Video</label>
-        <input type="file" name="video" accept="video/*" required>
+  <section class="summary-grid">
+    <div class="summary-card"><span>Tổng lượt phân tích</span><strong>{{ summary['total'] or 0 }}</strong></div>
+    <div class="summary-card"><span>Có phát hiện nước</span><strong>{{ summary['water_count'] or 0 }}</strong></div>
+    <div class="summary-card"><span>Mực nước cao nhất</span><strong>{% if summary['highest'] is not none %}{{ '%.2f'|format(summary['highest']) }} m{% else %}-{% endif %}</strong></div>
+  </section>
 
-        <label class="check"><input id="autoLine" type="checkbox" name="auto_line" checked> Tự đặt đường đo ở giữa video</label>
-        <p class="hint">Khuyên dùng khi chỉ muốn test nhanh. Đường đo sẽ tự co giãn theo đúng độ phân giải video.</p>
+  <section class="main-grid">
+    <div class="panel">
+      <h2>1. Dữ liệu đầu vào</h2>
+      <form id="analysisForm">
+        <label>Ảnh hoặc video</label>
+        <label class="dropzone" id="dropzone">
+          <input id="mediaInput" type="file" name="media" accept="image/*,video/*" required>
+          <div class="drop-icon">↑</div>
+          <strong>Chọn file hoặc kéo thả vào đây</strong>
+          <span>Ảnh: JPG, PNG, WEBP · Video: MP4, AVI, MOV, MKV</span>
+          <em id="fileName">Chưa chọn file</em>
+        </label>
 
-        <div id="manualFields" class="manual">
-          <label>Starting coordinates (x y)</label>
-          <input id="start" name="start" value="960 200" disabled>
-          <label>Ending coordinates (x y)</label>
-          <input id="end" name="end" value="960 900" disabled>
+        <h2 class="mode-heading">2. Chế độ phân tích</h2>
+        <div class="mode-selector">
+          <label class="mode-card active" id="autoModeCard">
+            <input type="radio" name="mode" value="auto" checked>
+            <span class="mode-icon">A</span>
+            <span><strong>Automatic</strong><small>Upload → Analyze, dùng cấu hình đã lưu.</small></span>
+          </label>
+          <label class="mode-card" id="manualModeCard">
+            <input type="radio" name="mode" value="manual">
+            <span class="mode-icon">M</span>
+            <span><strong>Manual</strong><small>Tự chỉnh calibration và ngưỡng.</small></span>
+          </label>
         </div>
 
-        <label>Pixels equivalent to 1 meter</label>
-        <input name="pixels_per_meter" type="number" step="any" value="200" required>
-
-        <label>Higher-point height (meters)</label>
-        <input name="tip_height" type="number" step="any" value="3" required>
-
-        <label>Alert levels (meters)</label>
-        <div class="thresholds">
-          <input name="low_level" type="number" step="any" value="0.20" required title="LOW">
-          <input name="medium_level" type="number" step="any" value="0.50" required title="MEDIUM">
-          <input name="high_level" type="number" step="any" value="0.80" required title="HIGH">
+        <div id="autoPanel" class="config-panel">
+          <div class="config-head">
+            <div><strong>Cấu hình Automatic</strong><span id="profileName">{{ calibration['profile_name'] }}</span></div>
+            <span class="saved-badge">SAVED</span>
+          </div>
+          <div class="profile-grid">
+            <div><span>Đường đo</span><strong id="autoLineSummary">{{ 'Tự động' if calibration['auto_line'] else 'Thủ công' }}</strong></div>
+            <div><span>Pixels / m</span><strong id="ppmSummary">{{ calibration['pixels_per_meter'] }}</strong></div>
+            <div><span>Độ cao chuẩn</span><strong id="tipSummary">{{ calibration['tip_height'] }} m</strong></div>
+            <div><span>LOW / MED / HIGH</span><strong id="thresholdSummary">{{ calibration['low_level'] }} / {{ calibration['medium_level'] }} / {{ calibration['high_level'] }}</strong></div>
+          </div>
+          <p class="note auto-note">Muốn đổi cấu hình Automatic: chuyển sang Manual, chỉnh thông số và bật “Lưu làm cấu hình Automatic”.</p>
         </div>
-        <p class="hint">Theo thứ tự: LOW / MEDIUM / HIGH. Phải thỏa LOW &lt; MEDIUM &lt; HIGH.</p>
 
-        <button id="submit" type="submit">Analyze video</button>
+        <div id="manualPanel" class="config-panel hidden">
+          <label>Tên cấu hình</label>
+          <input id="profileNameInput" name="profile_name" value="{{ calibration['profile_name'] }}" maxlength="60">
+
+          <div class="switch-row">
+            <div><strong>Đường đo tự động</strong><span>Đặt theo trục dọc giữa khung hình</span></div>
+            <label class="switch"><input id="autoLine" type="checkbox" name="auto_line" {% if calibration['auto_line'] %}checked{% endif %}><span></span></label>
+          </div>
+
+          <div class="visual-calibration">
+            <div class="visual-calibration-head">
+              <div>
+                <strong>Calibration trực quan</strong>
+                <span>Không cần tự ước lượng pixel. Chọn file trước, sau đó click trực tiếp trên khung hình.</span>
+              </div>
+              <span class="visual-badge">CLICK</span>
+            </div>
+
+            <div id="calibrationPreviewWrap" class="calibration-preview-wrap">
+              <canvas id="calibrationCanvas"></canvas>
+              <div id="calibrationPlaceholder" class="calibration-placeholder">Chọn ảnh/video ở bước 1 để bắt đầu calibration</div>
+            </div>
+            <video id="calibrationVideoSource" class="calibration-video-source" muted playsinline></video>
+
+            <div class="calibration-actions">
+              <div class="calibration-step">
+                <span class="step-number">1</span>
+                <div>
+                  <strong>Tính tỷ lệ pixel / mét</strong>
+                  <small>Nhập khoảng cách thật giữa 2 mốc, rồi click đúng 2 mốc đó trên ảnh.</small>
+                </div>
+              </div>
+              <div class="visual-row">
+                <label>Khoảng cách thật giữa 2 mốc (m)</label>
+                <div class="visual-inline">
+                  <input id="knownDistance" type="number" step="any" min="0.001" value="1.0">
+                  <button id="pickScaleBtn" class="mini-action" type="button">Chọn 2 mốc chuẩn</button>
+                </div>
+              </div>
+
+              <div class="calibration-step">
+                <span class="step-number">2</span>
+                <div>
+                  <strong>Đặt đường đo mực nước</strong>
+                  <small>Click điểm đầu rồi điểm cuối của đường đo. Tọa độ sẽ tự điền bên dưới.</small>
+                </div>
+              </div>
+              <button id="pickLineBtn" class="mini-action full" type="button">Chọn 2 điểm đường đo</button>
+              <button id="clearVisualBtn" class="mini-action ghost full" type="button">Xóa điểm calibration trực quan</button>
+              <p id="visualCalibrationStatus" class="visual-status">Chưa có thao tác calibration.</p>
+            </div>
+          </div>
+
+          <div id="manualFields" class="manual {% if calibration['auto_line'] %}disabled{% endif %}">
+            <div><label>Điểm bắt đầu (x y)</label><input id="start" name="start" value="{% if calibration['first_x'] is not none %}{{ calibration['first_x']|int }} {{ calibration['first_y']|int }}{% else %}960 200{% endif %}" {% if calibration['auto_line'] %}disabled{% endif %}></div>
+            <div><label>Điểm kết thúc (x y)</label><input id="end" name="end" value="{% if calibration['second_x'] is not none %}{{ calibration['second_x']|int }} {{ calibration['second_y']|int }}{% else %}960 900{% endif %}" {% if calibration['auto_line'] %}disabled{% endif %}></div>
+          </div>
+
+          <h2>3. Hiệu chuẩn</h2>
+          <div class="form-grid two">
+            <div><label>Pixels / 1 mét <small class="field-hint">(tự điền sau bước 1)</small></label><input id="pixelsPerMeter" name="pixels_per_meter" type="number" step="any" value="{{ calibration['pixels_per_meter'] }}" required></div>
+            <div><label>Độ cao điểm đầu (m)</label><input id="tipHeight" name="tip_height" type="number" step="any" value="{{ calibration['tip_height'] }}" required></div>
+          </div>
+
+          <label>Ngưỡng cảnh báo (m)</label>
+          <div class="form-grid three">
+            <div><span class="tag low">LOW</span><input id="lowLevel" name="low_level" type="number" step="any" value="{{ calibration['low_level'] }}" required></div>
+            <div><span class="tag medium">MEDIUM</span><input id="mediumLevel" name="medium_level" type="number" step="any" value="{{ calibration['medium_level'] }}" required></div>
+            <div><span class="tag high">HIGH</span><input id="highLevel" name="high_level" type="number" step="any" value="{{ calibration['high_level'] }}" required></div>
+          </div>
+
+          <label class="save-profile-row">
+            <input id="saveAsAuto" type="checkbox" name="save_as_auto">
+            <span><strong>Lưu làm cấu hình Automatic</strong><small>Lần phân tích sau chỉ cần upload file và bấm Analyze.</small></span>
+          </label>
+        </div>
+
+        <button id="submitBtn" class="primary" type="submit">Phân tích</button>
       </form>
-      <p class="hint">Các giá trị mét chỉ chính xác khi bạn đã calibration camera. Nếu model thấy nước nhưng đường đo không cắt vùng nước, hệ thống sẽ báo <b>WATER DETECTED</b> thay vì báo SAFE sai.</p>
+      <p class="note">Manual hỗ trợ calibration trực quan: click 2 mốc có khoảng cách thật đã biết để tự tính pixel/mét, sau đó click 2 điểm để đặt đường đo. Automatic dùng lại profile đã lưu cho cùng camera/góc quay.</p>
     </div>
 
-    <div class="card">
-      <div id="status" class="status">Ready.</div>
-      <div class="progress"><div id="bar" class="bar"></div></div>
-      <div id="error" class="error"></div>
-      <video id="result" controls style="display:none"></video>
-      <a id="download" class="download" style="display:none" download="flood_result.mp4">Download result video</a>
-      <div id="stats" class="stats" style="display:none">
-        <div class="stat">Processed frames<b id="sFrames">-</b></div>
-        <div class="stat">Water frames<b id="sWater">-</b></div>
-        <div class="stat">Measured frames<b id="sMeasured">-</b></div>
-        <div class="stat">Alert frames<b id="sAlerts">-</b></div>
-        <div class="stat">LOW frames<b id="sLow">-</b></div>
-        <div class="stat">MEDIUM frames<b id="sMedium">-</b></div>
-        <div class="stat">HIGH frames<b id="sHigh">-</b></div>
-        <div class="stat">Max water level<b id="sMax">-</b></div>
-      </div>
+    <div class="panel result-panel">
+      <div class="result-head"><div><h2>Kết quả</h2><p id="statusText">Sẵn sàng.</p></div><span id="stateBadge" class="badge neutral">READY</span></div>
+      <div class="progress"><div id="progressBar"></div></div>
+      <div id="errorBox" class="error-box"></div>
+
+      <div id="previewEmpty" class="preview-empty"><span>◫</span><p>Kết quả phân tích sẽ xuất hiện ở đây</p></div>
+      <img id="resultImage" class="result-media" alt="Kết quả" hidden>
+      <video id="resultVideo" class="result-media" controls hidden></video>
+
+      <div id="stats" class="stats-grid" hidden></div>
+      <a id="openResult" class="secondary" target="_blank" hidden>Mở file kết quả</a>
     </div>
-  </div>
-</div>
-<script>
-const form = document.getElementById('form');
-const submit = document.getElementById('submit');
-const statusEl = document.getElementById('status');
-const bar = document.getElementById('bar');
-const errorEl = document.getElementById('error');
-const result = document.getElementById('result');
-const download = document.getElementById('download');
-const stats = document.getElementById('stats');
-const autoLine = document.getElementById('autoLine');
-const manualFields = document.getElementById('manualFields');
-const startInput = document.getElementById('start');
-const endInput = document.getElementById('end');
-let timer = null;
+  </section>
 
-function syncLineMode() {
-  const manual = !autoLine.checked;
-  startInput.disabled = !manual;
-  endInput.disabled = !manual;
-  manualFields.classList.toggle('enabled', manual);
-}
-autoLine.addEventListener('change', syncLineMode);
-syncLineMode();
-
-form.addEventListener('submit', async (e) => {
-  e.preventDefault();
-  if (timer) clearInterval(timer);
-  submit.disabled = true;
-  errorEl.textContent = '';
-  result.style.display = 'none';
-  download.style.display = 'none';
-  stats.style.display = 'none';
-  bar.style.width = '0%';
-  statusEl.textContent = 'Uploading video...';
-
-  try {
-    const res = await fetch('/process', { method:'POST', body:new FormData(form) });
-    const data = await res.json();
-    if (!res.ok) throw new Error(data.error || 'Upload failed.');
-    poll(data.job_id);
-  } catch (err) {
-    submit.disabled = false;
-    errorEl.textContent = err.message;
-    statusEl.textContent = 'Failed.';
-  }
-});
-
-function poll(jobId) {
-  timer = setInterval(async () => {
-    try {
-      const res = await fetch('/status/' + jobId);
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error || 'Status error.');
-      const p = data.progress || 0;
-      bar.style.width = p + '%';
-      if (data.status === 'queued') statusEl.textContent = 'Waiting for processor...';
-      if (data.status === 'processing') {
-        const extra = data.total_frames ? ` (${data.frame || 0}/${data.total_frames} frames)` : '';
-        statusEl.textContent = `Processing: ${p}%${extra}`;
-      }
-      if (data.status === 'error') {
-        clearInterval(timer);
-        submit.disabled = false;
-        statusEl.textContent = 'Processing failed.';
-        errorEl.textContent = data.error || 'Unknown error.';
-      }
-      if (data.status === 'done') {
-        clearInterval(timer);
-        submit.disabled = false;
-        statusEl.textContent = 'Done.';
-        bar.style.width = '100%';
-        const url = data.result_url + '?v=' + Date.now();
-        result.src = url;
-        result.style.display = 'block';
-        download.href = url;
-        download.style.display = 'inline-block';
-
-        const s = data.stats || {};
-        document.getElementById('sFrames').textContent = s.processed_frames ?? '-';
-        document.getElementById('sWater').textContent = s.water_detected_frames ?? '-';
-        document.getElementById('sMeasured').textContent = s.measured_frames ?? '-';
-        document.getElementById('sAlerts').textContent = s.alert_frames ?? '-';
-        document.getElementById('sLow').textContent = s.low_frames ?? '-';
-        document.getElementById('sMedium').textContent = s.medium_frames ?? '-';
-        document.getElementById('sHigh').textContent = s.high_frames ?? '-';
-        document.getElementById('sMax').textContent = s.max_water_level == null ? '-' : s.max_water_level.toFixed(2) + ' m';
-        stats.style.display = 'grid';
-        result.load();
-      }
-    } catch (err) {
-      clearInterval(timer);
-      submit.disabled = false;
-      errorEl.textContent = err.message;
-    }
-  }, 1000);
-}
-</script>
+  {% if recent %}
+  <section class="panel recent-panel">
+    <div class="section-title"><h2>Phân tích gần đây</h2><a href="/history">Xem tất cả →</a></div>
+    <div class="table-wrap"><table><thead><tr><th>File</th><th>Loại</th><th>Kết quả</th><th>Mực nước cao nhất</th><th>Thời gian</th></tr></thead><tbody>
+    {% for row in recent %}
+      <tr><td>{{ row['filename'] }}</td><td>{{ row['media_type'] }}</td><td><span class="status-chip {{ row['alert_level']|lower|replace(' ','-') }}">{{ row['alert_level'] }}</span></td><td>{% if row['max_water_level'] is not none %}{{ '%.2f'|format(row['max_water_level']) }} m{% else %}-{% endif %}</td><td>{{ row['created_at'] }}</td></tr>
+    {% endfor %}
+    </tbody></table></div>
+  </section>
+  {% endif %}
+</main>
+<script src="/static/js/app.js"></script>
 </body>
 </html>

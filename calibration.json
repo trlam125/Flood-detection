@@ -1,0 +1,13 @@
+{
+  "auto_line": true,
+  "first_x": null,
+  "first_y": null,
+  "second_x": null,
+  "second_y": null,
+  "pixels_per_meter": 200.0,
+  "tip_height": 3.0,
+  "low_level": 0.2,
+  "medium_level": 0.5,
+  "high_level": 0.8,
+  "profile_name": "Default"
+}

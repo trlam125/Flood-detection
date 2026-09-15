@@ -13,3 +13,15 @@ The program is still imperfect, as the model only works best with single-area pe
 Also, the intersections-calculating algorithms will pose some troubles when 2 or more intersections were found between the line and the annotation mask, so the line coordinates should be chosen carefully.
 
 This will be fixed and modified in future updates.
+
+## Inference configuration
+
+The app reads these optional environment variables:
+
+- `FLOOD_CONFIDENCE` (default `0.25`): minimum segmentation confidence.
+- `FLOOD_IOU` (default `0.70`): NMS IoU threshold.
+- `FLOOD_IMGSZ` (default `640`): inference image size.
+- `FLOOD_LEVEL_SMOOTHING` (default `0.35`): temporal smoothing factor for water level.
+- `FLOOD_UPLOAD_RETENTION_HOURS` (default `24`): retention for uploaded files; generated outputs are kept seven times longer.
+
+Before retraining, evaluate `best.pt` on videos that were not used during training. Keep the dataset split by video, not by individual frames, and record precision, recall, and mAP for each scene.

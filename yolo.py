@@ -163,6 +163,130 @@ def _draw_panel(draw, width, height, lines, status_color):
         cy += th + line_gap
 
 
+def process_image(
+    image_path,
+    output_path,
+    first_x=None,
+    first_y=None,
+    second_x=None,
+    second_y=None,
+    pixels_per_meter=200.0,
+    tip_height=3.0,
+    low_level=0.20,
+    medium_level=0.50,
+    high_level=0.80,
+    auto_line=True,
+    model_path="best.pt",
+    confidence=0.25,
+    iou=0.7,
+    imgsz=640,
+):
+    if pixels_per_meter <= 0:
+        raise ValueError("Pixels per meter must be greater than 0.")
+    if not (low_level < medium_level < high_level):
+        raise ValueError("Alert levels must satisfy LOW < MEDIUM < HIGH.")
+    if not os.path.exists(model_path):
+        raise FileNotFoundError(f"Model not found: {model_path}")
+
+    frame = cv2.imread(image_path)
+    if frame is None:
+        raise RuntimeError(f"Could not open image: {image_path}")
+
+    height, width = frame.shape[:2]
+    if auto_line:
+        first_x, first_y = width * 0.50, height * 0.10
+        second_x, second_y = width * 0.50, height * 0.90
+    else:
+        coords = [first_x, first_y, second_x, second_y]
+        if any(value is None for value in coords):
+            raise ValueError("Manual measurement-line coordinates are missing.")
+        if not (0 <= first_x < width and 0 <= second_x < width and 0 <= first_y < height and 0 <= second_y < height):
+            raise ValueError(
+                f"Measurement line is outside the image. Image size is {width}x{height}; "
+                f"received ({first_x:.0f},{first_y:.0f}) -> ({second_x:.0f},{second_y:.0f})."
+            )
+
+    model = _get_model(model_path)
+    result = model(frame, conf=confidence, iou=iou, imgsz=imgsz, verbose=False)[0]
+    try:
+        annotated = result.plot(labels=False, boxes=False, conf=False)
+    except TypeError:
+        annotated = result.plot()
+
+    rgb = cv2.cvtColor(annotated, cv2.COLOR_BGR2RGB)
+    pil_image = Image.fromarray(rgb).convert("RGBA")
+    overlay = Image.new("RGBA", pil_image.size, (0, 0, 0, 0))
+    draw = ImageDraw.Draw(overlay)
+    line_width = max(2, int(min(width, height) * 0.004))
+    draw.line([(first_x, first_y), (second_x, second_y)], fill=(50, 220, 255, 230), width=line_width)
+
+    measurement_line = LineString([(first_x, first_y), (second_x, second_y)])
+    masks = result.masks
+    has_water_mask = masks is not None and len(masks.xyn) > 0
+    intersections = []
+    best_confidence = None
+
+    if result.boxes is not None and result.boxes.conf is not None and len(result.boxes.conf):
+        best_confidence = float(result.boxes.conf.max().item())
+
+    if has_water_mask:
+        for segment in masks.xyn:
+            if segment is None or len(segment) < 3:
+                continue
+            vertices = [(float(p[0]) * width, float(p[1]) * height) for p in segment]
+            polygon = Polygon(vertices)
+            if not polygon.is_valid:
+                polygon = polygon.buffer(0)
+            if polygon.is_empty:
+                continue
+            point = _find_nearest_intersection(polygon, measurement_line, (first_x, first_y))
+            if point is not None:
+                intersections.append(point)
+
+    water_level = None
+    status = "NO WATER"
+    if intersections:
+        ix, iy = min(intersections, key=lambda p: math.hypot(p[0] - first_x, p[1] - first_y))
+        water_level = max(0.0, float(tip_height - (math.hypot(ix - first_x, iy - first_y) / pixels_per_meter)))
+        water_level = round(water_level, 2)
+        status, status_color = _status_for_level(water_level, low_level, medium_level, high_level)
+        draw.line([(first_x, first_y), (ix, iy)], fill=(*status_color, 255), width=line_width + 2)
+        r = max(4, line_width * 2)
+        draw.ellipse([ix-r, iy-r, ix+r, iy+r], fill=(*status_color, 255))
+        _draw_panel(draw, width, height, [
+            f"STATUS: {status}",
+            f"Water level: {water_level:.2f} m",
+            f"Confidence: {best_confidence:.2f}" if best_confidence is not None else "Confidence: -",
+        ], status_color)
+    elif has_water_mask:
+        status = "WATER DETECTED"
+        _draw_panel(draw, width, height, [
+            "STATUS: WATER DETECTED",
+            "No level: measurement line does not cross water",
+            "Use Auto line or move the manual line",
+        ], (255, 210, 60))
+    else:
+        _draw_panel(draw, width, height, ["STATUS: NO WATER", "No water mask detected"], (80, 220, 120))
+
+    composed = Image.alpha_composite(pil_image, overlay).convert("RGB")
+    out_frame = cv2.cvtColor(np.array(composed), cv2.COLOR_RGB2BGR)
+    if not cv2.imwrite(output_path, out_frame):
+        raise RuntimeError("Could not save output image.")
+
+    return {
+        "output_path": output_path,
+        "water_detected": bool(has_water_mask),
+        "confidence": best_confidence,
+        "water_level": water_level,
+        "status": status,
+        "measurement_line": {
+            "start": [round(first_x, 1), round(first_y, 1)],
+            "end": [round(second_x, 1), round(second_y, 1)],
+        },
+        "image_size": [width, height],
+    }
+
+
 def process_video(
     video_path,
     output_path,
@@ -177,12 +301,24 @@ def process_video(
     high_level=0.80,
     auto_line=True,
     model_path="best.pt",
+    confidence=0.25,
+    iou=0.7,
+    imgsz=640,
+    smoothing=0.35,
     progress_callback=None,
 ):
     if pixels_per_meter <= 0:
         raise ValueError("Pixels per meter must be greater than 0.")
     if not (low_level < medium_level < high_level):
         raise ValueError("Alert levels must satisfy LOW < MEDIUM < HIGH.")
+    if not (0.0 < confidence <= 1.0):
+        raise ValueError("Confidence must be between 0 and 1.")
+    if not (0.0 < iou <= 1.0):
+        raise ValueError("IoU must be between 0 and 1.")
+    if imgsz < 320 or imgsz > 2048:
+        raise ValueError("Image size must be between 320 and 2048.")
+    if not (0.0 < smoothing <= 1.0):
+        raise ValueError("Smoothing must be between 0 and 1.")
     if not os.path.exists(model_path):
         raise FileNotFoundError(f"Model not found: {model_path}")
 
@@ -240,6 +376,7 @@ def process_video(
     medium_frames = 0
     high_frames = 0
     max_water_level = None
+    smoothed_level = None
 
     try:
         while cap.isOpened():
@@ -247,7 +384,7 @@ def process_video(
             if not success:
                 break
 
-            results = model(frame, verbose=False)
+            results = model(frame, conf=confidence, iou=iou, imgsz=imgsz, verbose=False)
             result = results[0]
 
             # Keep the segmentation mask but remove the large YOLO box/label overlay.
@@ -303,7 +440,11 @@ def process_video(
                 water_level = float(
                     tip_height - (math.hypot(ix - first_x, iy - first_y) / pixels_per_meter)
                 )
-                water_level = max(0.0, round(water_level, 2))
+                water_level = max(0.0, water_level)
+                smoothed_level = water_level if smoothed_level is None else (
+                    smoothing * water_level + (1.0 - smoothing) * smoothed_level
+                )
+                water_level = round(smoothed_level, 2)
                 if max_water_level is None or water_level > max_water_level:
                     max_water_level = water_level
 

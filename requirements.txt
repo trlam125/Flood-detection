@@ -1,7 +1,7 @@
-flask>=3.1
-ultralytics
-shapely>=2.1
-opencv-python
-pillow
-numpy
-imageio-ffmpeg
+flask==3.1.2
+ultralytics==8.3.203
+shapely==2.1.2
+opencv-python==4.12.0.88
+pillow==11.3.0
+numpy==2.2.6
+imageio-ffmpeg==0.6.0

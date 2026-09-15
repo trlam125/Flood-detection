@@ -1,0 +1,22 @@
+<!doctype html>
+<html lang="vi">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Lịch sử · Flood AI Monitor</title><link rel="stylesheet" href="/static/css/style.css"></head>
+<body>
+<header class="topbar"><div class="brand">Flood AI Monitor</div><nav><a href="/">Phân tích</a><a class="active" href="/history">Lịch sử</a></nav></header>
+<main class="container">
+  <section class="hero compact"><div><span class="eyebrow">Analysis History</span><h1>Lịch sử phân tích</h1><p>Lưu các lần phân tích đã hoàn tất trên máy local.</p></div><button id="clearHistory" class="danger">Xóa lịch sử</button></section>
+  <section class="panel">
+    {% if rows %}
+    <div class="table-wrap"><table><thead><tr><th>#</th><th>File</th><th>Loại</th><th>Phát hiện nước</th><th>Cảnh báo</th><th>Mực nước</th><th>Thời gian</th><th>Kết quả</th></tr></thead><tbody>
+    {% for row in rows %}
+      <tr><td>{{ row['id'] }}</td><td>{{ row['filename'] }}</td><td>{{ row['media_type'] }}</td><td>{{ 'Có' if row['water_detected'] else 'Không' }}</td><td><span class="status-chip {{ row['alert_level']|lower|replace(' ','-') }}">{{ row['alert_level'] }}</span></td><td>{% if row['max_water_level'] is not none %}{{ '%.2f'|format(row['max_water_level']) }} m{% else %}-{% endif %}</td><td>{{ row['created_at'] }}</td><td>{% if row['output_name'] %}<a href="/outputs/{{ row['output_name'] }}" target="_blank">Mở</a>{% else %}-{% endif %}</td></tr>
+    {% endfor %}
+    </tbody></table></div>
+    {% else %}<div class="preview-empty"><p>Chưa có lịch sử phân tích.</p></div>{% endif %}
+  </section>
+</main>
+<script>
+const btn=document.getElementById('clearHistory');
+if(btn) btn.onclick=async()=>{if(!confirm('Xóa toàn bộ lịch sử?')) return; const r=await fetch('/history',{method:'DELETE'}); if(r.ok) location.reload();};
+</script>
+</body></html>
