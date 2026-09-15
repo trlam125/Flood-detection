@@ -5,7 +5,6 @@ uploads/*
 !uploads/.gitkeep
 outputs/*
 !outputs/.gitkeep
-models/*.pth
 calibrations/*.json
 media/
 .env
