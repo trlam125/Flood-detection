@@ -1,50 +1,42 @@
 from __future__ import annotations
 
 import asyncio
-import os
 import threading
 import time
 import uuid
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 import cv2
 import imageio.v2 as imageio
-from fastapi import FastAPI, File, HTTPException, UploadFile
+from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, Field
 
-from .calibration import Calibration, CalibrationStore
-from .inference import analyze_frame, annotate_frame, smooth_metrics
-from .model import RIWASegmenter
+from .alerts import AlertManager, AlertPayload
+from .config import BASE_DIR, settings
+from .database import Database
+from .inference import FrameMetrics, analyze_frame, annotate_frame
+from .model import Segmenter, create_segmenter
+from .severity import SeverityThresholds, at_least, max_severity
 
-
-BASE_DIR = Path(__file__).resolve().parent.parent
-UPLOAD_DIR = BASE_DIR / "uploads"
-OUTPUT_DIR = BASE_DIR / "outputs"
-CALIB_DIR = BASE_DIR / "calibrations"
-MODEL_PATH = Path(os.getenv("RIWA_MODEL_PATH", BASE_DIR / "models" / "riwa_unet_resnet34_deploy.pth"))
-
-UPLOAD_DIR.mkdir(exist_ok=True)
-OUTPUT_DIR.mkdir(exist_ok=True)
-CALIB_DIR.mkdir(exist_ok=True)
-
-app = FastAPI(title="RIWA Flood Detection Web", version="3.0")
+app = FastAPI(title=settings.app_name, version="6.0")
 app.mount("/static", StaticFiles(directory=BASE_DIR / "app" / "static"), name="static")
-app.mount("/media/uploads", StaticFiles(directory=UPLOAD_DIR), name="uploads")
-app.mount("/media/outputs", StaticFiles(directory=OUTPUT_DIR), name="outputs")
+app.mount("/media/uploads", StaticFiles(directory=settings.upload_dir), name="uploads")
+app.mount("/media/outputs", StaticFiles(directory=settings.output_dir), name="outputs")
 
-segmenter: RIWASegmenter | None = None
+segmenter: Segmenter | None = None
 segmenter_error: str | None = None
-calibrations = CalibrationStore(CALIB_DIR)
+segmenter_lock = threading.Lock()
 jobs: dict[str, dict[str, Any]] = {}
 jobs_lock = threading.Lock()
+db = Database(settings.db_path)
+alert_manager = AlertManager(settings)
 
 
 @app.on_event("startup")
 async def suppress_benign_windows_connection_resets() -> None:
-    """Hide only WinError 10054 raised when a browser aborts an old media Range request."""
     loop = asyncio.get_running_loop()
     previous_handler = loop.get_exception_handler()
 
@@ -60,38 +52,60 @@ async def suppress_benign_windows_connection_resets() -> None:
     loop.set_exception_handler(handler)
 
 
-class CalibrationRequest(BaseModel):
-    profile: str = "default"
-    zero_y: float
-    known_y: float
-    known_cm: float = Field(gt=0)
-    zero_x: float | None = None
-    known_x: float | None = None
-    frame_width: float | None = Field(default=None, gt=0)
+VIDEO_EXTENSIONS = {".mp4", ".mov", ".avi", ".mkv", ".m4v"}
 
 
-class AnalyzeRequest(BaseModel):
+@dataclass(frozen=True)
+class AnalysisRequest:
     video_id: str
-    calibration_mode: str = "auto"  # auto | manual | none
-    profile: str = "default"
-    warning_cm: float = 20.0
-    danger_cm: float = 50.0
-    warning_ratio: float = 0.20
-    danger_ratio: float = 0.45
-    sample_every_n_frames: int = Field(default=1, ge=1, le=30)
+    sample_every_n_frames: int = 2
+    low_ratio: float | None = None
+    moderate_ratio: float | None = None
+    critical_ratio: float | None = None
 
 
-def get_segmenter() -> RIWASegmenter:
+def get_segmenter() -> Segmenter:
     global segmenter, segmenter_error
     if segmenter is not None:
         return segmenter
-    try:
-        segmenter = RIWASegmenter(MODEL_PATH)
-        segmenter_error = None
-        return segmenter
-    except Exception as exc:
-        segmenter_error = str(exc)
-        raise HTTPException(status_code=503, detail=segmenter_error) from exc
+    with segmenter_lock:
+        if segmenter is not None:
+            return segmenter
+        try:
+            segmenter = create_segmenter(settings.model_backend, settings.model_path, settings.yolo_model_path)
+            segmenter_error = None
+            return segmenter
+        except Exception as exc:
+            segmenter_error = str(exc)
+            raise HTTPException(status_code=503, detail=segmenter_error) from exc
+
+
+def _active_model_path() -> Path:
+    return settings.yolo_model_path if settings.model_backend == "yolo" else settings.model_path
+
+
+def find_video(video_id: str) -> Path:
+    for suffix in VIDEO_EXTENSIONS:
+        path = settings.upload_dir / f"{video_id}{suffix}"
+        if path.exists():
+            return path
+    raise FileNotFoundError(video_id)
+
+
+def update_job(job_id: str, **kwargs: Any) -> None:
+    with jobs_lock:
+        if job_id in jobs:
+            jobs[job_id].update(kwargs)
+
+
+def _thresholds(req: AnalysisRequest) -> SeverityThresholds:
+    t = SeverityThresholds(
+        low=settings.low_ratio if req.low_ratio is None else req.low_ratio,
+        moderate=settings.moderate_ratio if req.moderate_ratio is None else req.moderate_ratio,
+        critical=settings.critical_ratio if req.critical_ratio is None else req.critical_ratio,
+    )
+    t.validate()
+    return t
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -101,31 +115,61 @@ def index() -> str:
 
 @app.get("/api/health")
 def health() -> dict[str, Any]:
-    model_exists = MODEL_PATH.exists()
-    info = None
-    if model_exists:
-        try:
-            info = get_segmenter().info()
-        except HTTPException:
-            pass
+    model_path = _active_model_path()
+    info = segmenter.info() if segmenter is not None else None
     return {
-        "ok": model_exists and info is not None,
-        "model_exists": model_exists,
-        "model_path": str(MODEL_PATH),
+        "ok": model_path.exists(),
+        "app": settings.app_name,
+        "model_backend": settings.model_backend,
+        "model_exists": model_path.exists(),
+        "model_path": str(model_path),
+        "model_loaded": segmenter is not None,
         "model_error": segmenter_error,
         "model": info,
+        "device": None if info is None else info.get("device"),
+        "thresholds": {
+            "low": settings.low_ratio,
+            "moderate": settings.moderate_ratio,
+            "critical": settings.critical_ratio,
+        },
+        "alert_min_severity": settings.alert_min_severity,
+        "alert_confirm_frames": settings.alert_confirm_frames,
+        "alert_cooldown_sec": settings.alert_cooldown_sec,
+        "alert_channels": alert_manager.configured_channels(),
     }
 
 
 @app.post("/api/upload")
-async def upload_video(file: UploadFile = File(...)) -> dict[str, Any]:
+async def upload_video(
+    file: UploadFile = File(...),
+    sample_every_n_frames: int = Form(default=2, ge=1, le=30),
+    low_ratio: float | None = Form(default=None, ge=0.0, le=1.0),
+    moderate_ratio: float | None = Form(default=None, ge=0.0, le=1.0),
+    critical_ratio: float | None = Form(default=None, ge=0.0, le=1.0),
+) -> dict[str, Any]:
+    """Upload a video and immediately start automatic flood analysis."""
     suffix = Path(file.filename or "video.mp4").suffix.lower()
-    if suffix not in {".mp4", ".mov", ".avi", ".mkv", ".m4v"}:
+    if suffix not in VIDEO_EXTENSIONS:
         raise HTTPException(status_code=400, detail="Unsupported video format")
 
-    video_id = uuid.uuid4().hex
-    video_path = UPLOAD_DIR / f"{video_id}{suffix}"
+    req = AnalysisRequest(
+        video_id="pending",
+        sample_every_n_frames=sample_every_n_frames,
+        low_ratio=low_ratio,
+        moderate_ratio=moderate_ratio,
+        critical_ratio=critical_ratio,
+    )
+    try:
+        _thresholds(req)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
+    # Fail early if the configured model is unavailable. Uploading a video should
+    # mean that analysis can actually start without another manual action.
+    get_segmenter()
+
+    video_id = uuid.uuid4().hex
+    video_path = settings.upload_dir / f"{video_id}{suffix}"
     with video_path.open("wb") as dst:
         while True:
             chunk = await file.read(1024 * 1024)
@@ -135,254 +179,242 @@ async def upload_video(file: UploadFile = File(...)) -> dict[str, Any]:
 
     cap = cv2.VideoCapture(str(video_path))
     if not cap.isOpened():
+        video_path.unlink(missing_ok=True)
         raise HTTPException(status_code=400, detail="Cannot open uploaded video")
 
-    fps = cap.get(cv2.CAP_PROP_FPS) or 25.0
+    fps = float(cap.get(cv2.CAP_PROP_FPS) or 25.0)
     frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
     width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH) or 0)
     height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT) or 0)
     ok, first = cap.read()
     cap.release()
-
     if not ok or first is None:
-        raise HTTPException(status_code=400, detail="Cannot read first video frame")
+        video_path.unlink(missing_ok=True)
+        raise HTTPException(status_code=400, detail="Cannot read uploaded video")
 
-    preview_name = f"{video_id}_preview.jpg"
-    preview_path = UPLOAD_DIR / preview_name
-    cv2.imwrite(str(preview_path), first)
+    if width <= 0 or height <= 0:
+        height, width = first.shape[:2]
+    duration = frames / fps if fps > 0 and frames > 0 else 0.0
+
+    req = AnalysisRequest(
+        video_id=video_id,
+        sample_every_n_frames=sample_every_n_frames,
+        low_ratio=low_ratio,
+        moderate_ratio=moderate_ratio,
+        critical_ratio=critical_ratio,
+    )
+    job_id = _start_analysis_job(req)
 
     return {
         "video_id": video_id,
-        "filename": video_path.name,
-        "preview_url": f"/media/uploads/{preview_name}",
-        "width": width,
-        "height": height,
+        "job_id": job_id,
+        "filename": file.filename,
+        "video_url": f"/media/uploads/{video_path.name}",
         "fps": fps,
         "frames": frames,
-        "duration_sec": frames / fps if fps > 0 else None,
+        "width": width,
+        "height": height,
+        "duration_sec": duration,
     }
 
 
-@app.post("/api/calibration")
-def save_calibration(req: CalibrationRequest) -> dict[str, Any]:
-    cal = Calibration(
-        req.profile,
-        req.zero_y,
-        req.known_y,
-        req.known_cm,
-        zero_x=req.zero_x,
-        known_x=req.known_x,
-        frame_width=req.frame_width,
+def _record_alert(job_id: str, metrics: FrameMetrics, time_sec: float) -> dict[str, Any]:
+    payload = AlertPayload(
+        analysis_id=job_id,
+        severity=metrics.severity,
+        water_ratio=metrics.water_ratio,
+        time_sec=time_sec,
     )
-    try:
-        cpp = cal.cm_per_pixel
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-    calibrations.save(cal)
+    dispatch = alert_manager.dispatch(payload)
+    channels = [name for name, result in dispatch.items() if name != "cooldown" and isinstance(result, dict)]
+    alert_id = db.add_alert(
+        analysis_id=job_id,
+        severity=metrics.severity,
+        water_ratio=metrics.water_ratio,
+        time_sec=time_sec,
+        message=payload.message,
+        channels=channels,
+        dispatch=dispatch,
+    )
     return {
-        "saved": True,
-        "profile": req.profile,
-        "cm_per_pixel": cpp,
-        "zero_y": req.zero_y,
-        "known_y": req.known_y,
-        "known_cm": req.known_cm,
-        "zero_x": req.zero_x,
-        "known_x": req.known_x,
-        "measurement_x": cal.measurement_x,
-        "frame_width": cal.frame_width,
+        "id": alert_id,
+        "severity": metrics.severity,
+        "water_ratio": metrics.water_ratio,
+        "time_sec": time_sec,
+        "message": payload.message,
+        "dispatch": dispatch,
     }
 
 
-@app.get("/api/calibration/{profile}")
-def get_calibration(profile: str) -> dict[str, Any]:
-    cal = calibrations.load(profile)
-    if cal is None:
-        return {"exists": False, "profile": profile}
-    return {
-        "exists": True,
-        "profile": profile,
-        "zero_y": cal.zero_y,
-        "known_y": cal.known_y,
-        "known_cm": cal.known_cm,
-        "cm_per_pixel": cal.cm_per_pixel,
-        "zero_x": cal.zero_x,
-        "known_x": cal.known_x,
-        "measurement_x": cal.measurement_x,
-        "frame_width": cal.frame_width,
-    }
-
-
-def find_video(video_id: str) -> Path:
-    matches = list(UPLOAD_DIR.glob(f"{video_id}.*"))
-    matches = [p for p in matches if "_preview" not in p.stem]
-    if not matches:
-        raise FileNotFoundError(video_id)
-    return matches[0]
-
-
-def update_job(job_id: str, **kwargs: Any) -> None:
-    with jobs_lock:
-        jobs[job_id].update(kwargs)
-
-
-def process_video(job_id: str, req: AnalyzeRequest) -> None:
+def process_video(job_id: str, req: AnalysisRequest) -> None:
+    writer = None
+    cap = None
     try:
         seg = get_segmenter()
+        thresholds = _thresholds(req)
         video_path = find_video(req.video_id)
-
-        calibration = None
-        if req.calibration_mode != "none":
-            calibration = calibrations.load(req.profile)
-
         cap = cv2.VideoCapture(str(video_path))
         if not cap.isOpened():
             raise RuntimeError("Cannot open video")
 
-        fps = cap.get(cv2.CAP_PROP_FPS) or 25.0
+        fps = float(cap.get(cv2.CAP_PROP_FPS) or 25.0)
         total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
         width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH) or 0)
         height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT) or 0)
-
         output_name = f"{job_id}_annotated.mp4"
-        output_path = OUTPUT_DIR / output_name
-        writer = imageio.get_writer(
-            str(output_path),
-            fps=fps,
-            codec="libx264",
-            quality=7,
-            macro_block_size=None,
-        )
+        output_path = settings.output_dir / output_name
+        writer = imageio.get_writer(str(output_path), fps=fps, codec="libx264", quality=7, macro_block_size=None)
 
         frame_idx = 0
         analyzed_frames = 0
+        ratio_sum = 0.0
         max_ratio = 0.0
-        sum_ratio = 0.0
-        max_level: float | None = None
-        sum_level = 0.0
-        level_count = 0
-        highest_status = "SAFE"
-        status_rank = {"SAFE": 0, "WARNING": 1, "DANGER": 2}
+        highest = "SAFE"
         timeline: list[dict[str, Any]] = []
-        last_mask = None
-        last_metrics = None
-        smoothed_metrics = None
-        confidence_sum = 0.0
-        confidence_count = 0
+        alerts: list[dict[str, Any]] = []
+        alerted_severities: set[str] = set()
+        previous_ratio: float | None = None
+        last_mask: Any = None
+        last_metrics: FrameMetrics | None = None
+        current_alert_severity: str | None = None
+        alert_streak = 0
 
         while True:
             ok, frame = cap.read()
-            if not ok:
+            if not ok or frame is None:
                 break
 
-            do_infer = frame_idx % req.sample_every_n_frames == 0 or last_mask is None
+            do_infer = frame_idx % req.sample_every_n_frames == 0 or last_metrics is None
             if do_infer:
                 mask, metrics = analyze_frame(
                     seg,
                     frame,
-                    calibration,
-                    req.warning_cm,
-                    req.danger_cm,
-                    req.warning_ratio,
-                    req.danger_ratio,
+                    thresholds,
+                    previous_ratio=previous_ratio,
+                    ema_alpha=settings.ema_alpha,
                 )
-                metrics = smooth_metrics(
-                    smoothed_metrics,
-                    metrics,
-                    calibration,
-                    req.warning_cm,
-                    req.danger_cm,
-                    req.warning_ratio,
-                    req.danger_ratio,
-                )
-                smoothed_metrics = metrics
-                last_mask, last_metrics = mask, metrics
+                previous_ratio = metrics.water_ratio
+                last_mask = mask
+                last_metrics = metrics
                 analyzed_frames += 1
+                ratio_sum += metrics.water_ratio
                 max_ratio = max(max_ratio, metrics.water_ratio)
-                sum_ratio += metrics.water_ratio
-                if metrics.water_level_cm is not None:
-                    max_level = metrics.water_level_cm if max_level is None else max(max_level, metrics.water_level_cm)
-                    sum_level += metrics.water_level_cm
-                    level_count += 1
-                    confidence_sum += metrics.waterline_confidence
-                    confidence_count += 1
-                if status_rank[metrics.status] > status_rank[highest_status]:
-                    highest_status = metrics.status
+                highest = max_severity(highest, metrics.severity)
 
-                # One timeline point per ~1 second at most.
-                if not timeline or frame_idx / fps - timeline[-1]["time_sec"] >= 0.9:
-                    timeline.append(
-                        {
-                            "time_sec": round(frame_idx / fps, 2),
-                            "water_ratio": round(metrics.water_ratio, 5),
-                            "water_level_cm": None if metrics.water_level_cm is None else round(metrics.water_level_cm, 2),
-                            "waterline_confidence": round(metrics.waterline_confidence, 4),
-                            "status": metrics.status,
-                        }
-                    )
+                time_sec = frame_idx / fps if fps > 0 else 0.0
+                if not timeline or time_sec - timeline[-1]["time_sec"] >= 0.75:
+                    timeline.append({
+                        "time_sec": round(time_sec, 2),
+                        "water_ratio": round(metrics.water_ratio, 5),
+                        "raw_water_ratio": round(metrics.raw_water_ratio, 5),
+                        "severity": metrics.severity,
+                        "confidence": round(metrics.confidence, 4),
+                    })
 
-            annotated = annotate_frame(frame, last_mask, last_metrics, calibration)
-            writer.append_data(cv2.cvtColor(annotated, cv2.COLOR_BGR2RGB))
+                if at_least(metrics.severity, settings.alert_min_severity):
+                    if metrics.severity == current_alert_severity:
+                        alert_streak += 1
+                    else:
+                        current_alert_severity = metrics.severity
+                        alert_streak = 1
+                    if (
+                        alert_streak >= settings.alert_confirm_frames
+                        and metrics.severity not in alerted_severities
+                    ):
+                        alert = _record_alert(job_id, metrics, time_sec)
+                        alerts.append(alert)
+                        alerted_severities.add(metrics.severity)
+                else:
+                    current_alert_severity = None
+                    alert_streak = 0
+
+            if last_mask is None or last_metrics is None:
+                writer.append_data(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
+            else:
+                annotated = annotate_frame(frame, last_mask, last_metrics)
+                writer.append_data(cv2.cvtColor(annotated, cv2.COLOR_BGR2RGB))
 
             frame_idx += 1
             if total > 0 and frame_idx % max(1, int(fps)) == 0:
-                progress = min(99.0, frame_idx * 100.0 / total)
-                update_job(job_id, progress=round(progress, 1), processed_frames=frame_idx)
+                update_job(
+                    job_id,
+                    progress=round(min(99.0, frame_idx * 100.0 / total), 1),
+                    processed_frames=frame_idx,
+                    live={
+                        "severity": None if last_metrics is None else last_metrics.severity,
+                        "water_ratio": None if last_metrics is None else last_metrics.water_ratio,
+                    },
+                )
 
-        cap.release()
-        writer.close()
+        if cap is not None:
+            cap.release()
+            cap = None
+        if writer is not None:
+            writer.close()
+            writer = None
 
         result = {
+            "analysis_id": job_id,
+            "video_id": req.video_id,
             "output_url": f"/media/outputs/{output_name}",
             "frames": frame_idx,
             "analyzed_frames": analyzed_frames,
             "fps": fps,
             "width": width,
             "height": height,
+            "duration_sec": frame_idx / fps if fps > 0 else 0.0,
             "max_water_ratio": max_ratio,
-            "mean_water_ratio": sum_ratio / max(1, analyzed_frames),
-            "max_water_level_cm": max_level,
-            "mean_water_level_cm": None if level_count == 0 else sum_level / level_count,
-            "mean_waterline_confidence": None if confidence_count == 0 else confidence_sum / confidence_count,
-            "highest_status": highest_status,
+            "mean_water_ratio": ratio_sum / max(1, analyzed_frames),
+            "highest_severity": highest,
             "timeline": timeline,
-            "calibration_used": calibration is not None,
-            "calibration_profile": req.profile if calibration is not None else None,
-            "model_threshold": seg.threshold,
-            "measurement_mode": "automatic_calibrated_level" if calibration is not None else "area_ratio",
-            "automatic_waterline": True,
+            "alerts": alerts,
+            "alert_count": len(alerts),
+            "model": seg.info(),
+            "thresholds": {
+                "low": thresholds.low,
+                "moderate": thresholds.moderate,
+                "critical": thresholds.critical,
+            },
+            "sample_every_n_frames": req.sample_every_n_frames,
         }
-        update_job(job_id, status="done", progress=100.0, result=result)
-
+        db.finish_analysis(job_id, result)
+        update_job(job_id, status="done", progress=100.0, processed_frames=frame_idx, result=result)
     except Exception as exc:
-        update_job(job_id, status="error", error=str(exc), progress=100.0)
+        if cap is not None:
+            cap.release()
+        if writer is not None:
+            try:
+                writer.close()
+            except Exception:
+                pass
+        db.fail_analysis(job_id, str(exc))
+        update_job(job_id, status="error", progress=100.0, error=str(exc))
 
 
-@app.post("/api/analyze")
-def start_analysis(req: AnalyzeRequest) -> dict[str, str]:
+def _start_analysis_job(req: AnalysisRequest) -> str:
     try:
         find_video(req.video_id)
     except FileNotFoundError as exc:
         raise HTTPException(status_code=404, detail="Uploaded video not found") from exc
+    try:
+        _thresholds(req)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
-    if req.danger_cm <= req.warning_cm:
-        raise HTTPException(status_code=400, detail="danger_cm must be greater than warning_cm")
-    if req.danger_ratio <= req.warning_ratio:
-        raise HTTPException(status_code=400, detail="danger_ratio must be greater than warning_ratio")
-
-    # Validate model before starting background work.
     get_segmenter()
-
     job_id = uuid.uuid4().hex
-    jobs[job_id] = {
-        "status": "queued",
-        "progress": 0.0,
-        "processed_frames": 0,
-        "created_at": time.time(),
-    }
+    with jobs_lock:
+        jobs[job_id] = {
+            "status": "queued",
+            "progress": 0.0,
+            "processed_frames": 0,
+            "created_at": time.time(),
+        }
+    db.start_analysis(job_id, req.video_id)
     thread = threading.Thread(target=process_video, args=(job_id, req), daemon=True)
     thread.start()
     update_job(job_id, status="running")
-    return {"job_id": job_id}
+    return job_id
 
 
 @app.get("/api/jobs/{job_id}")
@@ -392,3 +424,13 @@ def job_status(job_id: str) -> dict[str, Any]:
         if job is None:
             raise HTTPException(status_code=404, detail="Job not found")
         return dict(job)
+
+
+@app.get("/api/history")
+def history(limit: int = 20) -> dict[str, Any]:
+    return {"items": db.recent_analyses(limit)}
+
+
+@app.get("/api/alerts")
+def alerts(limit: int = 30) -> dict[str, Any]:
+    return {"items": db.recent_alerts(limit)}

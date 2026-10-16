@@ -1,434 +1,310 @@
 const $ = (id) => document.getElementById(id);
-
-let uploaded = null;
-let calPoints = [];
-let calibrationExists = false;
-let savedCalibration = null;
-let calibrating = false;
-let pollTimer = null;
-let activeJobId = null;
-let loadedResultVideoUrl = null;
-
-const uploadBox = $("uploadBox");
-const fileInput = $("videoFile");
-const previewImage = $("previewImage");
-const canvas = $("calCanvas");
-const ctx = canvas.getContext("2d");
+let activeJob = null;
+let thresholds = { low: 0.10, moderate: 0.20, critical: 0.45 };
 
 async function api(url, options = {}) {
-  const res = await fetch(url, options);
-  let data = null;
-  try { data = await res.json(); } catch (_) { }
-  if (!res.ok) throw new Error(data?.detail || `HTTP ${res.status}`);
+  const response = await fetch(url, options);
+  let data = {};
+  try { data = await response.json(); } catch (_) {}
+  if (!response.ok) throw new Error(data.detail || `Request failed (${response.status})`);
   return data;
 }
 
-async function checkHealth() {
+function pct(value, digits = 1) {
+  return `${(Number(value || 0) * 100).toFixed(digits)}%`;
+}
+
+function severityClass(value) {
+  return String(value || "SAFE").toLowerCase();
+}
+
+function setSeverityBadge(value) {
+  const el = $("liveSeverity");
+  el.textContent = value || "SAFE";
+  el.className = `severity-badge ${severityClass(value)}`;
+}
+
+function updateLegend() {
+  const low = Number($("lowRatio").value || 10);
+  const mod = Number($("moderateRatio").value || 20);
+  const crit = Number($("criticalRatio").value || 45);
+  $("safeText").textContent = `below ${low}%`;
+  $("lowText").textContent = `${low}-${mod}%`;
+  $("moderateText").textContent = `${mod}-${crit}%`;
+  $("criticalText").textContent = `${crit}%+`;
+}
+["lowRatio", "moderateRatio", "criticalRatio"].forEach((id) => $(id).addEventListener("input", updateLegend));
+
+async function loadHealth() {
   try {
-    const data = await api("/api/health");
-    const badge = $("modelBadge");
-    if (data.ok) {
-      badge.className = "model-badge ok";
-      badge.textContent = `Model ready · ${data.model.device} · t=${Number(data.model.threshold).toFixed(2)}`;
-    } else {
-      badge.className = "model-badge bad";
-      badge.textContent = "Model not ready";
-    }
-  } catch (_) {
-    $("modelBadge").className = "model-badge bad";
-    $("modelBadge").textContent = "Model error";
+    const h = await api("/api/health");
+    thresholds = h.thresholds || thresholds;
+    $("lowRatio").value = Math.round(thresholds.low * 100);
+    $("moderateRatio").value = Math.round(thresholds.moderate * 100);
+    $("criticalRatio").value = Math.round(thresholds.critical * 100);
+    updateLegend();
+
+    const model = $("modelBadge");
+    model.textContent = h.model_exists ? `${String(h.model_backend).toUpperCase()} model ready` : "Water model missing";
+    model.className = `badge ${h.model_exists ? "ok" : "bad"}`;
+    $("deviceBadge").textContent = `Device ${h.device || "auto"}`;
+
+    const channelBox = $("alertChannels");
+    channelBox.innerHTML = "";
+    (h.alert_channels || ["dashboard"]).forEach((name) => {
+      const chip = document.createElement("span");
+      chip.className = "chip";
+      chip.textContent = name.toUpperCase();
+      channelBox.appendChild(chip);
+    });
+  } catch (error) {
+    $("modelBadge").textContent = "Backend unavailable";
+    $("modelBadge").className = "badge bad";
   }
 }
 
-function setCalibrationBadge(state, text) {
-  const badge = $("calibrationBadge");
-  badge.className = `state-pill ${state}`;
-  badge.textContent = text;
-}
-
-function calibrationPointsFromData(data) {
-  if (!uploaded || !data?.exists) return [];
-  const zx = data.zero_x ?? uploaded.width * 0.5;
-  const kx = data.known_x ?? zx;
-  return [
-    { x: zx, y: data.zero_y },
-    { x: kx, y: data.known_y },
-  ];
-}
-
-async function checkCalibrationProfile({ loadPoints = true, silent = false } = {}) {
-  const profile = $("profile").value.trim() || "default";
-  try {
-    const data = await api(`/api/calibration/${encodeURIComponent(profile)}`);
-    calibrationExists = Boolean(data.exists);
-    savedCalibration = data.exists ? data : null;
-    if (data.exists) {
-      setCalibrationBadge("ok", "Auto level ready");
-      $("knownCm").value = data.known_cm;
-      if (loadPoints && uploaded) calPoints = calibrationPointsFromData(data);
-      if (!silent) $("calStatus").textContent = `Saved scale: ${Number(data.cm_per_pixel).toFixed(4)} cm/pixel`;
-    } else {
-      setCalibrationBadge("warning", "Area fallback");
-      savedCalibration = null;
-      if (!calibrating) calPoints = [];
-      if (!silent) $("calStatus").textContent = "No calibration saved for this fixed camera. Water-area alerts will still work.";
-    }
-    drawPoints();
-    updatePointStatus();
-    return data;
-  } catch (e) {
-    calibrationExists = false;
-    savedCalibration = null;
-    setCalibrationBadge("bad", "Calibration error");
-    if (!silent) $("calStatus").textContent = e.message;
-    return null;
+function readAnalysisOptions() {
+  const low = Number($("lowRatio").value) / 100;
+  const moderate = Number($("moderateRatio").value) / 100;
+  const critical = Number($("criticalRatio").value) / 100;
+  if (!(0 <= low && low < moderate && moderate < critical && critical <= 1)) {
+    throw new Error("Thresholds must satisfy SAFE < LOW < MODERATE < CRITICAL and stay within 0-100%.");
   }
+  return {
+    low,
+    moderate,
+    critical,
+    sampleEveryN: Number($("sampleN").value || 2),
+  };
 }
 
-function setCalibrating(on) {
-  calibrating = on;
-  $("manualPanel").classList.toggle("hidden", !on);
-  $("toggleCalibration").textContent = on ? "Cancel calibration" : "Set / update calibration";
-  canvas.style.pointerEvents = on ? "auto" : "none";
-  if (on && calibrationExists && savedCalibration) calPoints = calibrationPointsFromData(savedCalibration);
-  if (on && !calibrationExists) calPoints = [];
-  drawPoints();
-  updatePointStatus();
-}
-
-$("toggleCalibration").addEventListener("click", () => setCalibrating(!calibrating));
-
-uploadBox.addEventListener("dragover", (e) => { e.preventDefault(); uploadBox.classList.add("drag"); });
-uploadBox.addEventListener("dragleave", () => uploadBox.classList.remove("drag"));
-uploadBox.addEventListener("drop", (e) => {
-  e.preventDefault();
-  uploadBox.classList.remove("drag");
-  if (e.dataTransfer.files?.[0]) uploadVideo(e.dataTransfer.files[0]);
-});
-fileInput.addEventListener("change", () => {
-  if (fileInput.files?.[0]) uploadVideo(fileInput.files[0]);
-});
-
-async function uploadVideo(file) {
-  stopPolling();
-  resetResultVideo();
-  $("uploadStatus").textContent = "Uploading...";
-  $("analyzeBtn").disabled = true;
-  const fd = new FormData();
-  fd.append("file", file);
-  try {
-    uploaded = await api("/api/upload", { method: "POST", body: fd });
-    $("uploadStatus").textContent = file.name;
-    renderMeta(uploaded);
-    previewImage.onload = async () => {
-      fitCanvas();
-      await checkCalibrationProfile({ loadPoints: true, silent: true });
-      drawPoints();
-    };
-    previewImage.src = `${uploaded.preview_url}?t=${Date.now()}`;
-    previewImage.classList.remove("hidden");
-    canvas.classList.remove("hidden");
-    $("previewPlaceholder").classList.add("hidden");
-    $("analyzeBtn").disabled = false;
-    updatePointStatus();
-  } catch (e) {
-    $("uploadStatus").textContent = `Error: ${e.message}`;
-  }
-}
-
-function renderMeta(meta) {
-  const duration = meta.duration_sec == null ? "-" : `${meta.duration_sec.toFixed(1)}s`;
-  $("videoMeta").innerHTML = `
-    <div><span>Size</span><strong>${meta.width}×${meta.height}</strong></div>
-    <div><span>FPS</span><strong>${Number(meta.fps).toFixed(1)}</strong></div>
-    <div><span>Frames</span><strong>${meta.frames}</strong></div>
-    <div><span>Length</span><strong>${duration}</strong></div>`;
-  $("videoMeta").classList.remove("hidden");
-}
-
-function fitCanvas() {
-  const wrapRect = $("previewWrap").getBoundingClientRect();
-  canvas.width = Math.max(1, Math.round(wrapRect.width));
-  canvas.height = Math.max(1, Math.round(wrapRect.height));
-  drawPoints();
-}
-window.addEventListener("resize", fitCanvas);
-
-canvas.addEventListener("click", (e) => {
-  if (!calibrating || !uploaded) return;
-  const rect = canvas.getBoundingClientRect();
-  const xCanvas = e.clientX - rect.left;
-  const yCanvas = e.clientY - rect.top;
-  const imgRect = previewImage.getBoundingClientRect();
-  const wrapRect = $("previewWrap").getBoundingClientRect();
-  const imgLeft = imgRect.left - wrapRect.left;
-  const imgTop = imgRect.top - wrapRect.top;
-  const xIn = xCanvas - imgLeft;
-  const yIn = yCanvas - imgTop;
-  if (xIn < 0 || yIn < 0 || xIn > imgRect.width || yIn > imgRect.height) return;
-
-  const naturalX = xIn * uploaded.width / imgRect.width;
-  const naturalY = yIn * uploaded.height / imgRect.height;
-  if (calPoints.length >= 2) calPoints = [];
-  calPoints.push({ x: naturalX, y: naturalY });
-  drawPoints();
-  updatePointStatus();
-});
-
-function drawPoints() {
-  ctx.clearRect(0, 0, canvas.width, canvas.height);
-  if (!uploaded || !calPoints.length || previewImage.classList.contains("hidden")) return;
-
-  const imgRect = previewImage.getBoundingClientRect();
-  const wrapRect = $("previewWrap").getBoundingClientRect();
-  const left = imgRect.left - wrapRect.left;
-  const top = imgRect.top - wrapRect.top;
-  const mapped = calPoints.map((p) => ({
-    x: left + p.x * imgRect.width / uploaded.width,
-    y: top + p.y * imgRect.height / uploaded.height,
-  }));
-
-  const centerX = mapped.reduce((s, p) => s + p.x, 0) / mapped.length;
-  const zoneWidth = imgRect.width * 0.16;
-  ctx.fillStyle = "rgba(69, 167, 255, .08)";
-  ctx.fillRect(centerX - zoneWidth / 2, top, zoneWidth, imgRect.height);
-  ctx.strokeStyle = "rgba(69, 167, 255, .45)";
-  ctx.setLineDash([5, 5]);
-  ctx.strokeRect(centerX - zoneWidth / 2, top, zoneWidth, imgRect.height);
-  ctx.setLineDash([]);
-
-  ctx.lineWidth = 2;
-  ctx.font = "bold 12px system-ui";
-  mapped.forEach((p, i) => {
-    ctx.beginPath();
-    ctx.fillStyle = i === 0 ? "#45a7ff" : "#f0b84b";
-    ctx.arc(p.x, p.y, 6, 0, Math.PI * 2);
-    ctx.fill();
-    ctx.fillText(i === 0 ? "0 cm baseline" : "known reference", p.x + 9, p.y - 7);
-    ctx.strokeStyle = i === 0 ? "rgba(69,167,255,.7)" : "rgba(240,184,75,.7)";
-    ctx.beginPath();
-    ctx.moveTo(centerX - zoneWidth / 2, p.y);
-    ctx.lineTo(centerX + zoneWidth / 2, p.y);
-    ctx.stroke();
-  });
-  if (mapped.length === 2) {
-    ctx.strokeStyle = "#ffffff";
-    ctx.setLineDash([5, 5]);
-    ctx.beginPath();
-    ctx.moveTo(mapped[0].x, mapped[0].y);
-    ctx.lineTo(mapped[1].x, mapped[1].y);
-    ctx.stroke();
-    ctx.setLineDash([]);
-  }
-}
-
-function updatePointStatus() {
-  const pill = $("pointStatus");
-  if (!uploaded) { pill.textContent = "Upload a video"; return; }
-  if (!calibrating) {
-    pill.textContent = calibrationExists ? "Automatic level ready" : "Area fallback";
+async function uploadFile(file) {
+  if (!file) return;
+  if (activeJob) {
+    showError("An analysis is already running. Please wait for it to finish before uploading another video.");
     return;
   }
-  if (calPoints.length === 0) pill.textContent = "Click 0 cm baseline";
-  if (calPoints.length === 1) pill.textContent = "Click known reference";
-  if (calPoints.length === 2) pill.textContent = "Ready to save";
-}
 
-$("resetPoints").addEventListener("click", () => {
-  calPoints = [];
-  drawPoints();
-  updatePointStatus();
-  $("calStatus").textContent = "";
-});
-
-$("saveCalibration").addEventListener("click", async () => {
-  if (!uploaded) { $("calStatus").textContent = "Upload a video first."; return; }
-  if (calPoints.length !== 2) { $("calStatus").textContent = "Select both calibration points first."; return; }
-  const knownCm = Number($("knownCm").value);
-  if (!Number.isFinite(knownCm) || knownCm <= 0) { $("calStatus").textContent = "Reference distance must be greater than 0."; return; }
-
-  const payload = {
-    profile: $("profile").value.trim() || "default",
-    zero_y: calPoints[0].y,
-    known_y: calPoints[1].y,
-    known_cm: knownCm,
-    zero_x: calPoints[0].x,
-    known_x: calPoints[1].x,
-    frame_width: uploaded.width,
-  };
-
-  try {
-    const data = await api("/api/calibration", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(payload),
-    });
-    calibrationExists = true;
-    setCalibrationBadge("ok", "Auto level ready");
-    $("calStatus").textContent = `Saved · ${data.cm_per_pixel.toFixed(4)} cm/pixel · automatic measurement zone enabled`;
-    await checkCalibrationProfile({ loadPoints: true, silent: true });
-    setCalibrating(false);
-  } catch (e) {
-    $("calStatus").textContent = `Error: ${e.message}`;
-  }
-});
-
-$("loadProfile").addEventListener("click", async () => {
-  await checkCalibrationProfile({ loadPoints: true, silent: false });
-});
-
-$("profile").addEventListener("change", async () => {
-  calPoints = [];
-  await checkCalibrationProfile({ loadPoints: true, silent: true });
-});
-
-$("analyzeBtn").addEventListener("click", async () => {
-  if (!uploaded) return;
   $("analysisError").classList.add("hidden");
-  $("resultSection").classList.add("hidden");
-  $("progressArea").classList.remove("hidden");
-  $("analyzeBtn").disabled = true;
+  let options;
+  try {
+    options = readAnalysisOptions();
+  } catch (error) {
+    showError(error.message);
+    return;
+  }
 
-  const payload = {
-    video_id: uploaded.video_id,
-    calibration_mode: "auto",
-    profile: $("profile").value.trim() || "default",
-    warning_cm: Number($("warningCm").value),
-    danger_cm: Number($("dangerCm").value),
-    warning_ratio: Number($("warningRatioPct").value) / 100,
-    danger_ratio: Number($("dangerRatioPct").value) / 100,
-    sample_every_n_frames: Number($("sampleN").value),
-  };
+  $("uploadInfo").classList.remove("hidden");
+  $("uploadInfo").textContent = `Uploading ${file.name}...`;
+  $("progressOverlay").classList.remove("hidden");
+  $("progressBar").style.width = "0%";
+  $("progressPercent").textContent = "0%";
+  $("progressText").textContent = "Uploading video";
+  $("liveMetric").textContent = "";
+  $("liveMetric").classList.add("hidden");
+  $("resultSection").classList.add("hidden");
+  setSeverityBadge("SAFE");
+
+  const form = new FormData();
+  form.append("file", file);
+  form.append("sample_every_n_frames", String(options.sampleEveryN));
+  form.append("low_ratio", String(options.low));
+  form.append("moderate_ratio", String(options.moderate));
+  form.append("critical_ratio", String(options.critical));
 
   try {
-    const data = await api("/api/analyze", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(payload),
-    });
-    pollJob(data.job_id);
-  } catch (e) {
-    showAnalysisError(e.message);
+    const upload = await api("/api/upload", { method: "POST", body: form });
+    $("uploadInfo").innerHTML = `<b>${escapeHtml(upload.filename || file.name)}</b><span>${upload.width}x${upload.height} | ${upload.fps.toFixed(1)} FPS | ${upload.duration_sec.toFixed(1)} s</span>`;
+    $("videoPlayer").src = upload.video_url;
+    $("videoPlayer").classList.add("visible");
+    $("emptyState").classList.add("hidden");
+    $("mediaSubtitle").textContent = "Processing video...";
+
+    if (!upload.job_id) throw new Error("Upload succeeded but the analysis job was not created.");
+    activeJob = upload.job_id;
+    $("progressText").textContent = "Processing video";
+    $("liveMetric").classList.remove("hidden");
+    $("liveMetric").textContent = "Waiting for first inference frame...";
+    pollJob(upload.job_id);
+  } catch (error) {
+    activeJob = null;
+    finishProgress();
+    $("uploadInfo").textContent = error.message;
+    showError(error.message);
   }
+}
+
+$("videoFile").addEventListener("change", (event) => {
+  const file = event.target.files[0];
+  uploadFile(file);
+  event.target.value = "";
 });
+const drop = $("dropZone");
+["dragenter", "dragover"].forEach((name) => drop.addEventListener(name, (event) => {
+  event.preventDefault();
+  drop.classList.add("dragging");
+}));
+["dragleave", "drop"].forEach((name) => drop.addEventListener(name, (event) => {
+  event.preventDefault();
+  drop.classList.remove("dragging");
+}));
+drop.addEventListener("drop", (event) => uploadFile(event.dataTransfer.files[0]));
 
-function resetResultVideo() {
-  const video = $("resultVideo");
-  if (!video) return;
-  video.pause();
-  video.removeAttribute("src");
-  video.load();
-  loadedResultVideoUrl = null;
-}
-
-function stopPolling() {
-  if (pollTimer) { clearTimeout(pollTimer); pollTimer = null; }
-  activeJobId = null;
-}
-
-function pollJob(jobId) {
-  stopPolling();
-  activeJobId = jobId;
-  const tick = async () => {
-    if (activeJobId !== jobId) return;
-    try {
-      const job = await api(`/api/jobs/${jobId}`);
-      if (activeJobId !== jobId) return;
-      const p = Number(job.progress || 0);
-      $("progressBar").style.width = `${p}%`;
-      $("progressPercent").textContent = `${p.toFixed(0)}%`;
-      if (job.status === "running") $("progressText").textContent = `Processing ${job.processed_frames || 0} frames...`;
-      else if (job.status === "queued") $("progressText").textContent = "Queued...";
-      else $("progressText").textContent = job.status;
-
-      if (job.status === "done") {
-        stopPolling();
-        $("analyzeBtn").disabled = false;
-        renderResult(job.result);
-        return;
-      }
-      if (job.status === "error") {
-        stopPolling();
-        showAnalysisError(job.error || "Analysis failed");
-        return;
-      }
-      pollTimer = setTimeout(tick, 900);
-    } catch (e) {
-      stopPolling();
-      showAnalysisError(e.message);
+async function pollJob(jobId) {
+  if (activeJob !== jobId) return;
+  try {
+    const job = await api(`/api/jobs/${jobId}`);
+    const progress = Number(job.progress || 0);
+    $("progressBar").style.width = `${progress}%`;
+    $("progressPercent").textContent = `${progress.toFixed(0)}%`;
+    $("progressText").textContent = job.status === "running" ? `Processing ${job.processed_frames || 0} frames` : job.status;
+    if (job.live) {
+      setSeverityBadge(job.live.severity);
+      $("liveMetric").textContent = `${job.live.severity} | Flooded area ${pct(job.live.water_ratio)}`;
     }
-  };
-  tick();
+    if (job.status === "done") {
+      activeJob = null;
+      finishProgress();
+      renderResult(job.result);
+      await Promise.all([loadAlerts(), loadHistory()]);
+      return;
+    }
+    if (job.status === "error") {
+      activeJob = null;
+      finishProgress();
+      showError(job.error || "Analysis failed");
+      return;
+    }
+    setTimeout(() => pollJob(jobId), 850);
+  } catch (error) {
+    activeJob = null;
+    finishProgress();
+    showError(error.message);
+  }
 }
 
-function showAnalysisError(message) {
+function finishProgress() {
+  $("progressOverlay").classList.add("hidden");
+}
+
+function renderResult(result) {
+  $("resultSection").classList.remove("hidden");
+  $("videoPlayer").src = `${result.output_url}?v=${Date.now()}`;
+  $("videoPlayer").load();
+  $("mediaSubtitle").textContent = "Annotated result: segmentation mask, severity and flooded-area ratio.";
+  setSeverityBadge(result.highest_severity);
+  $("highestSeverity").textContent = result.highest_severity;
+  $("highestSeverity").className = severityClass(result.highest_severity);
+  $("maxRatio").textContent = pct(result.max_water_ratio);
+  $("meanRatio").textContent = pct(result.mean_water_ratio);
+  $("alertCount").textContent = String(result.alert_count || 0);
+  $("analysisMeta").textContent = `${result.analyzed_frames} inference frames | ${result.model.backend.toUpperCase()}`;
+  drawTimeline(result.timeline || [], result.thresholds || thresholds);
+}
+
+function drawTimeline(points, limits) {
+  const canvas = $("timelineChart");
+  const ratio = window.devicePixelRatio || 1;
+  const width = canvas.clientWidth || 800;
+  const height = 220;
+  canvas.width = width * ratio;
+  canvas.height = height * ratio;
+  const ctx = canvas.getContext("2d");
+  ctx.scale(ratio, ratio);
+  ctx.clearRect(0, 0, width, height);
+
+  const pad = { left: 46, right: 18, top: 16, bottom: 30 };
+  const chartW = width - pad.left - pad.right;
+  const chartH = height - pad.top - pad.bottom;
+  ctx.font = "11px system-ui";
+  ctx.strokeStyle = "#2a3949";
+  ctx.fillStyle = "#8fa2b5";
+  ctx.lineWidth = 1;
+  [0, 0.25, 0.5, 0.75, 1].forEach((v) => {
+    const y = pad.top + chartH * (1 - v);
+    ctx.beginPath(); ctx.moveTo(pad.left, y); ctx.lineTo(width - pad.right, y); ctx.stroke();
+    ctx.fillText(`${Math.round(v * 100)}%`, 8, y + 4);
+  });
+
+  const maxT = Math.max(1, ...points.map((p) => Number(p.time_sec || 0)));
+  const xOf = (t) => pad.left + chartW * (Number(t || 0) / maxT);
+  const yOf = (v) => pad.top + chartH * (1 - Math.max(0, Math.min(1, Number(v || 0))));
+
+  [[limits.low, "LOW"], [limits.moderate, "MOD"], [limits.critical, "CRIT"]].forEach(([value, label]) => {
+    const y = yOf(value);
+    ctx.setLineDash([5, 5]);
+    ctx.strokeStyle = "#56697d";
+    ctx.beginPath(); ctx.moveTo(pad.left, y); ctx.lineTo(width - pad.right, y); ctx.stroke();
+    ctx.setLineDash([]);
+    ctx.fillStyle = "#9fb0c1";
+    ctx.fillText(label, width - pad.right - 30, y - 4);
+  });
+
+  if (points.length > 0) {
+    ctx.strokeStyle = "#54aaf5";
+    ctx.lineWidth = 2.5;
+    ctx.beginPath();
+    points.forEach((p, index) => {
+      const x = xOf(p.time_sec);
+      const y = yOf(p.water_ratio);
+      if (index === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+    });
+    ctx.stroke();
+  }
+  ctx.fillStyle = "#8fa2b5";
+  ctx.fillText("0s", pad.left, height - 8);
+  ctx.fillText(`${maxT.toFixed(1)}s`, width - pad.right - 34, height - 8);
+}
+
+async function loadAlerts() {
+  try {
+    const data = await api("/api/alerts?limit=12");
+    const root = $("alertsList");
+    const items = data.items || [];
+    if (!items.length) { root.className = "list-empty"; root.textContent = "No alerts yet."; return; }
+    root.className = "activity-list";
+    root.innerHTML = items.map((item) => `
+      <div class="activity-row">
+        <span class="status-dot ${severityClass(item.severity)}"></span>
+        <div><b>${escapeHtml(item.severity)}</b><span>${pct(item.water_ratio)} flooded | ${formatTime(item.created_at)}</span></div>
+        <small>${(item.channels || []).map((x) => escapeHtml(x)).join(", ")}</small>
+      </div>`).join("");
+  } catch (_) {}
+}
+
+async function loadHistory() {
+  try {
+    const data = await api("/api/history?limit=12");
+    const root = $("historyList");
+    const items = data.items || [];
+    if (!items.length) { root.className = "list-empty"; root.textContent = "No completed analyses yet."; return; }
+    root.className = "activity-list";
+    root.innerHTML = items.map((item) => `
+      <div class="activity-row">
+        <span class="status-dot ${severityClass(item.highest_severity)}"></span>
+        <div><b>${escapeHtml(item.highest_severity || item.status)}</b><span>${pct(item.max_water_ratio)} max | ${formatTime(item.created_at)}</span></div>
+        <small>${item.analyzed_frames || 0} frames</small>
+      </div>`).join("");
+  } catch (_) {}
+}
+
+function formatTime(epoch) {
+  if (!epoch) return "--";
+  return new Date(Number(epoch) * 1000).toLocaleString();
+}
+
+function showError(message) {
   $("analysisError").textContent = message;
   $("analysisError").classList.remove("hidden");
-  $("analyzeBtn").disabled = false;
-  $("progressArea").classList.add("hidden");
 }
 
-function formatWaterLevel(cm) {
-  if (cm == null || Number.isNaN(Number(cm))) return "-";
-  const value = Number(cm);
-  return value >= 100 ? `${(value / 100).toFixed(2)} m` : `${value.toFixed(1)} cm`;
+function escapeHtml(value) {
+  return String(value ?? "").replace(/[&<>'"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", "'": "&#39;", '"': "&quot;" }[c]));
 }
 
-function renderResult(r) {
-  $("progressArea").classList.add("hidden");
-  $("resultSection").classList.remove("hidden");
-
-  const calibrated = Boolean(r.calibration_used);
-  $("calibratedMetrics").classList.toggle("hidden", !calibrated);
-  $("areaMetrics").classList.toggle("hidden", calibrated);
-
-  $("maxLevel").textContent = formatWaterLevel(r.max_water_level_cm);
-  $("meanLevel").textContent = formatWaterLevel(r.mean_water_level_cm);
-  $("maxRatio").textContent = `${(Number(r.max_water_ratio) * 100).toFixed(1)}%`;
-  $("meanRatio").textContent = `${(Number(r.mean_water_ratio) * 100).toFixed(1)}%`;
-
-  if (calibrated) {
-    $("resultMeasurementHint").textContent = `Automatic waterline + saved calibration profile “${r.calibration_profile}”. Real-world level drives the alert.`;
-    $("measurementModeChip").textContent = "Mode: automatic level";
-    $("secondaryAreaChip").textContent = `Peak water area: ${(Number(r.max_water_ratio) * 100).toFixed(1)}%`;
-    const conf = r.mean_waterline_confidence == null ? null : Number(r.mean_waterline_confidence) * 100;
-    $("confidenceChip").textContent = conf == null ? "Waterline confidence: -" : `Waterline confidence: ${conf.toFixed(0)}%`;
-  } else {
-    $("resultMeasurementHint").textContent = "No saved calibration was found, so the alert used water-area percentage. Calibrate this fixed camera once to enable automatic cm/m levels.";
-    $("measurementModeChip").textContent = "Mode: area fallback";
-    $("secondaryAreaChip").textContent = "Physical level: calibration required";
-    $("confidenceChip").textContent = "Waterline confidence: not used";
-  }
-  $("modelThresholdChip").textContent = `Model threshold: ${Number(r.model_threshold).toFixed(2)}`;
-
-  const badge = $("statusBadge");
-  badge.textContent = r.highest_status;
-  badge.className = "status-badge";
-  if (r.highest_status === "WARNING") badge.classList.add("warning");
-  if (r.highest_status === "DANGER") badge.classList.add("danger");
-
-  const video = $("resultVideo");
-  if (loadedResultVideoUrl !== r.output_url) {
-    resetResultVideo();
-    video.src = r.output_url;
-    video.load();
-    loadedResultVideoUrl = r.output_url;
-  }
-
-  $("timeline").innerHTML = (r.timeline || []).map((x) => {
-    const primary = calibrated ? `Level ${formatWaterLevel(x.water_level_cm)}` : `Area ${(x.water_ratio * 100).toFixed(1)}%`;
-    const conf = calibrated && x.waterline_confidence != null ? `Confidence ${(x.waterline_confidence * 100).toFixed(0)}%` : "Area-based alert";
-    return `<div class="timeline-row">
-      <span>${x.time_sec.toFixed(1)}s</span>
-      <span>${primary}</span>
-      <span>${conf}</span>
-      <strong class="${x.status.toLowerCase()}">${x.status}</strong>
-    </div>`;
-  }).join("");
-
-  $("resultSection").scrollIntoView({ behavior: "smooth", block: "start" });
-}
-
-setCalibrating(false);
-checkHealth();
-checkCalibrationProfile({ loadPoints: true, silent: true });
+$("refreshAlerts").addEventListener("click", loadAlerts);
+$("refreshHistory").addEventListener("click", loadHistory);
+loadHealth();
+loadAlerts();
+loadHistory();
+updateLegend();
