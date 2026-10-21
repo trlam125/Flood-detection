@@ -18,9 +18,10 @@ default_level_path = BASE_DIR / "models" / "best_flood_level_model.pth"
 if not default_level_path.exists():
     default_level_path = BASE_DIR / "models" / "flood_level_resnet18.pth"
 LEVEL_MODEL_PATH = Path(os.getenv("LEVEL_MODEL_PATH", default_level_path))
-LEVEL_MIN_CONF = float(os.getenv("LEVEL_MIN_CONF", "0.5"))
+LEVEL_MIN_CONF = float(os.getenv("LEVEL_MIN_CONF", "0.4"))
 LEVEL_EMA_ALPHA = float(os.getenv("LEVEL_EMA_ALPHA", "0.4"))
-USE_CAR_CROP = os.getenv("USE_CAR_CROP", "1") == "1"
+USE_CAR_CROP = os.getenv("USE_CAR_CROP", "0") == "1"
+CAR_DETECTOR_PATH = Path(os.getenv("CAR_DETECTOR_PATH", BASE_DIR / "models" / "yolov8n.pt"))
 LEVEL_INFO: dict[str, dict[str, Any]] = {
     "Level0": {
         "title": "Level 0 - Không ngập (An toàn)",
@@ -31,6 +32,10 @@ LEVEL_INFO: dict[str, dict[str, Any]] = {
         "color": "#55c978",
         "advisory": "Tất cả phương tiện lưu thông an toàn, điều kiện di chuyển bình thường.",
         "rank": 0,
+        "ascii_title": "LEVEL 0 - AN TOAN",
+        "ascii_depth": "< 5 cm",
+        "ascii_desc": "Mat duong kho rao",
+        "ascii_advisory": "Tat ca phuong tien luu thong an toan",
     },
     "Level1": {
         "title": "Level 1 - Ngập mép lốp xe",
@@ -41,6 +46,10 @@ LEVEL_INFO: dict[str, dict[str, Any]] = {
         "color": "#e2c44f",
         "advisory": "Xe máy và ô tô vẫn di chuyển an toàn; cần chú ý giảm tốc độ tránh trơn trượt.",
         "rank": 1,
+        "ascii_title": "LEVEL 1 - MEP LOP XE",
+        "ascii_depth": "5 - 15 cm",
+        "ascii_desc": "Ngap cham mep duoi lop xe",
+        "ascii_advisory": "Xe may & oto giam toc do, tranh tron truot",
     },
     "Level2": {
         "title": "Level 2 - Ngập nửa bánh xe",
@@ -51,6 +60,10 @@ LEVEL_INFO: dict[str, dict[str, Any]] = {
         "color": "#ee963f",
         "advisory": "Cảnh báo ngập vừa! Xe sedan gầm thấp và xe máy có nguy cơ vào nước ống xả, hạn chế đi qua.",
         "rank": 2,
+        "ascii_title": "LEVEL 2 - NUA BANH XE (CANH BAO)",
+        "ascii_depth": "15 - 30 cm",
+        "ascii_desc": "Ngap toi truc / nua banh xe",
+        "ascii_advisory": "Xe sedan & xe may nguy co vao nuoc ong xa",
     },
     "Level3": {
         "title": "Level 3 - Ngập qua bánh xe",
@@ -61,6 +74,10 @@ LEVEL_INFO: dict[str, dict[str, Any]] = {
         "color": "#ef5757",
         "advisory": "Nguy hiểm cao! Cấm xe con và xe máy lưu thông, nguy cơ thủy kích và trôi xe nghiêm trọng.",
         "rank": 3,
+        "ascii_title": "LEVEL 3 - QUA BANH XE (NGUY HIEM)",
+        "ascii_depth": "30 - 50 cm",
+        "ascii_desc": "Ngap qua dinh banh xe",
+        "ascii_advisory": "CAM XE CON & XE MAY - Nguy co thuy kich!",
     },
     "Level4": {
         "title": "Level 4 - Ngập nắp capo / Khẩn cấp",
@@ -71,6 +88,10 @@ LEVEL_INFO: dict[str, dict[str, Any]] = {
         "color": "#d92525",
         "advisory": "Tình trạng khẩn cấp! Nguy hiểm trực tiếp đến tính mạng. Cần cứu hộ cứu nạn khẩn cấp!",
         "rank": 4,
+        "ascii_title": "LEVEL 4 - NAP CAPO (KHAN CAP)",
+        "ascii_depth": "> 50 cm",
+        "ascii_desc": "Ngap nap capo / gan noc xe",
+        "ascii_advisory": "KHAN CAP! Nguy hiem tinh mang, can cuu ho!",
     },
     "NO_CAR": {
         "title": "Chưa phát hiện xe",
@@ -81,6 +102,24 @@ LEVEL_INFO: dict[str, dict[str, Any]] = {
         "color": "#8ea2b6",
         "advisory": "Đo độ ngập dựa trên tỷ lệ diện tích phân đoạn vùng nước.",
         "rank": -1,
+        "ascii_title": "NO VEHICLE DETECTED",
+        "ascii_depth": "--",
+        "ascii_desc": "Chua phat hien xe trong khung hinh",
+        "ascii_advisory": "Uoc tinh dua tren dien tich vung nuoc",
+    },
+    "UNCERTAIN": {
+        "title": "Đang theo dõi mức ngập",
+        "short_title": "Uncertain",
+        "desc": "Đang phân tích độ tin cậy của mô hình mức ngập",
+        "depth": "--",
+        "severity": "NEUTRAL",
+        "color": "#8ea2b6",
+        "advisory": "Đang thu thập và phân tích dữ liệu khung hình liên tục.",
+        "rank": -1,
+        "ascii_title": "ANALYZING LEVEL...",
+        "ascii_depth": "--",
+        "ascii_desc": "Dang phan tich do tin cay",
+        "ascii_advisory": "Dang thu thap du lieu khung hinh",
     },
 }
 

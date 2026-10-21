@@ -23,19 +23,30 @@ class AlertPayload:
 
     @property
     def message(self) -> str:
-        level_part = ""
-        if self.level and self.level != "NO_CAR":
-            info = get_level_info(self.level)
-            conf_str = f" ({self.level_confidence * 100:.0f}%)" if self.level_confidence > 0 else ""
-            level_part = f" | Mức ngập xe: {self.level} - {info.get('desc')} [{info.get('depth')}]{conf_str}."
-        elif self.level == "NO_CAR":
-            level_part = " | (Chưa phát hiện xe)."
+        info = get_level_info(self.level)
+        level_title = info.get("title", self.level or "N/A")
+        depth = info.get("depth", "--")
+        advisory = info.get("advisory", "")
+        conf_str = f" (Độ tin cậy: {self.level_confidence * 100:.0f}%)" if self.level_confidence > 0 else ""
 
-        return (
-            f"CẢNH BÁO NGẬP LỤT: [{self.severity}]{level_part} "
-            f"Diện tích ngập: {self.water_ratio * 100:.1f}% khung hình tại {self.time_sec:.1f}s. "
-            f"Mã phân tích: {self.analysis_id}."
-        )
+        if self.level and self.level not in ("NO_CAR", "UNCERTAIN"):
+            level_part = f"Mức độ ngập: {level_title} [Độ sâu ước tính: {depth}]{conf_str} (Data: best_flood_level_model)"
+        elif self.level == "NO_CAR":
+            level_part = "Mức độ ngập: Chưa phát hiện xe cụ thể (Đo theo tỷ lệ diện tích phân đoạn)"
+        else:
+            level_part = f"Mức độ ngập: {self.level or 'Đang theo dõi'}"
+
+        advisory_part = f"Khuyến cáo: {advisory}" if advisory else ""
+
+        parts = [
+            f"🚨 CẢNH BÁO NGẬP LỤT [{self.severity}]",
+            level_part,
+            f"Diện tích ngập nước: {self.water_ratio * 100:.1f}% khung hình tại {self.time_sec:.1f}s",
+        ]
+        if advisory_part:
+            parts.append(advisory_part)
+        parts.append(f"Mã: {self.analysis_id}")
+        return " | ".join(parts)
 
 
 class AlertManager:
@@ -80,7 +91,8 @@ class AlertManager:
             if not all([self.settings.smtp_username, self.settings.smtp_password, self.settings.email_to]):
                 raise RuntimeError("SMTP credentials or EMAIL_TO are missing")
             msg = EmailMessage()
-            msg["Subject"] = f"[{payload.severity}] Flood warning"
+            level_tag = f" - {payload.level}" if payload.level and payload.level != "NO_CAR" else ""
+            msg["Subject"] = f"[{payload.severity}{level_tag}] Cảnh báo ngập lụt tại {payload.time_sec:.1f}s"
             msg["From"] = self.settings.email_from or self.settings.smtp_username
             msg["To"] = self.settings.email_to
             msg.set_content(payload.message)

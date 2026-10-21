@@ -7,181 +7,194 @@
   <link rel="stylesheet" href="/static/style.css">
 </head>
 <body>
-  <div class="app-shell">
-    <header class="topbar">
-      <div>
-        <div class="eyebrow">AUTOMATIC FLOOD DETECTION</div>
-        <h1>RIWA FloodEye Monitor</h1>
-        <p>Water segmentation, flooded-area severity and automatic alerts. No manual calibration.</p>
-      </div>
-      <div class="system-state">
-        <span id="modelBadge" class="badge neutral">Checking model</span>
-        <span id="deviceBadge" class="badge neutral">Device --</span>
-      </div>
-    </header>
+<div class="app-shell">
+  <header class="topbar">
+    <div>
+      <div class="eyebrow">AUTOMATIC FLOOD DETECTION</div>
+      <h1>RIWA FloodEye Monitor</h1>
+      <p>Water segmentation, flooded-area severity and automatic alerts. No manual calibration.</p>
+    </div>
+    <div class="system-state">
+      <span id="modelBadge" class="badge neutral">Checking model</span>
+      <span id="deviceBadge" class="badge neutral">Device --</span>
+    </div>
+  </header>
 
-    <main class="layout">
-      <aside class="side-column">
-        <section class="panel upload-panel">
-          <div class="panel-title">
-            <div>
-              <span class="step">1</span>
-              <h2>Video source</h2>
+  <main class="layout">
+    <aside class="side-column">
+      <section class="panel upload-panel">
+        <div class="panel-title">
+          <div>
+            <span class="step">1</span>
+            <h2>Video source</h2>
+          </div>
+        </div>
+        <label id="dropZone" class="drop-zone" for="videoFile">
+          <input id="videoFile" type="file" accept="video/*" hidden>
+          <strong>Choose or drop a flood video</strong>
+          <span>MP4, MOV, AVI, MKV, M4V</span>
+        </label>
+        <div id="uploadInfo" class="upload-info hidden"></div>
+      </section>
+
+      <section class="panel">
+        <div class="panel-title">
+          <div>
+            <span class="step">2</span>
+            <h2>Automatic severity</h2>
+          </div>
+        </div>
+        <div class="severity-legend">
+          <div><span class="dot safe"></span><b>SAFE</b><small id="safeText">below 10%</small></div>
+          <div><span class="dot low"></span><b>LOW</b><small id="lowText">10-20%</small></div>
+          <div><span class="dot moderate"></span><b>MODERATE</b><small id="moderateText">20-45%</small></div>
+          <div><span class="dot critical"></span><b>CRITICAL</b><small id="criticalText">45%+</small></div>
+        </div>
+
+        <details class="advanced">
+          <summary>Advanced thresholds</summary>
+          <div class="field-grid">
+            <label>Low (%)<input id="lowRatio" type="number" min="0" max="100" step="1" value="10"></label>
+            <label>Moderate (%)<input id="moderateRatio" type="number" min="0" max="100" step="1" value="20"></label>
+            <label>Critical (%)<input id="criticalRatio" type="number" min="0" max="100" step="1" value="45"></label>
+            <label>Sample every N frames<input id="sampleN" type="number" min="1" max="30" step="1" value="2"></label>
+          </div>
+        </details>
+
+        <details class="advanced level-guide-details" open>
+          <summary>Cẩm nang mức ngập xe (Level 0 - 4)</summary>
+          <div class="level-guide-list">
+            <div class="level-guide-item"><span class="level-tag level0">L0</span><div><b>Khô ráo (&lt; 5cm)</b><small>An toàn di chuyển</small></div></div>
+            <div class="level-guide-item"><span class="level-tag level1">L1</span><div><b>Mép lốp (5 - 15cm)</b><small>Ngập nhẹ, giảm tốc</small></div></div>
+            <div class="level-guide-item"><span class="level-tag level2">L2</span><div><b>Nửa bánh (15 - 30cm)</b><small>Nguy cơ chết máy sedan</small></div></div>
+            <div class="level-guide-item"><span class="level-tag level3">L3</span><div><b>Qua bánh (30 - 50cm)</b><small>Cấm xe con &amp; xe máy</small></div></div>
+            <div class="level-guide-item"><span class="level-tag level4">L4</span><div><b>Nắp capo (&gt; 50cm)</b><small>Nguy hiểm khẩn cấp</small></div></div>
+          </div>
+        </details>
+      </section>
+
+      <section class="panel">
+        <div class="panel-title">
+          <div>
+            <span class="step">3</span>
+            <h2>Alert channels</h2>
+          </div>
+        </div>
+        <div id="alertChannels" class="channel-list"><span class="chip">Dashboard</span></div>
+      </section>
+
+      <div id="analysisError" class="error-box hidden"></div>
+    </aside>
+
+    <section class="main-column">
+      <section class="panel media-panel">
+        <div class="media-head">
+          <div>
+            <h2>Detection view</h2>
+            <p id="mediaSubtitle">Upload a video to begin.</p>
+          </div>
+          <div class="header-badges">
+            <span id="liveLevel" class="level-badge-tag neutral hidden">Level --</span>
+            <span id="liveSeverity" class="severity-badge safe">SAFE</span>
+          </div>
+        </div>
+        <div class="media-stage">
+          <video id="videoPlayer" controls playsinline></video>
+          <div id="emptyState" class="empty-state">
+            <strong>No video loaded</strong>
+            <span>The same display size is kept for every input resolution.</span>
+          </div>
+          <div id="progressOverlay" class="progress-overlay hidden">
+            <div class="progress-card">
+              <div class="progress-row"><span id="progressText">Starting analysis</span><b id="progressPercent">0%</b></div>
+              <div class="progress-track"><div id="progressBar"></div></div>
+              <div id="liveMetric" class="live-metric">Waiting for first inference frame...</div>
             </div>
           </div>
-          <label id="dropZone" class="drop-zone" for="videoFile">
-            <input id="videoFile" type="file" accept="video/*" hidden>
-            <strong>Choose or drop a flood video</strong>
-            <span>MP4, MOV, AVI, MKV, M4V</span>
-          </label>
-          <div id="uploadInfo" class="upload-info hidden"></div>
-        </section>
-
-        <section class="panel">
-          <div class="panel-title">
-            <div>
-              <span class="step">2</span>
-              <h2>Automatic severity</h2>
-            </div>
-          </div>
-          <div class="severity-legend">
-            <div><span class="dot safe"></span><b>SAFE</b><small id="safeText">below 10%</small></div>
-            <div><span class="dot low"></span><b>LOW</b><small id="lowText">10-20%</small></div>
-            <div><span class="dot moderate"></span><b>MODERATE</b><small id="moderateText">20-45%</small></div>
-            <div><span class="dot critical"></span><b>CRITICAL</b><small id="criticalText">45%+</small></div>
-          </div>
-
-          <details class="advanced">
-            <summary>Advanced thresholds</summary>
-            <div class="field-grid">
-              <label>Low (%)<input id="lowRatio" type="number" min="0" max="100" step="1" value="10"></label>
-              <label>Moderate (%)<input id="moderateRatio" type="number" min="0" max="100" step="1" value="20"></label>
-              <label>Critical (%)<input id="criticalRatio" type="number" min="0" max="100" step="1" value="45"></label>
-              <label>Sample every N frames<input id="sampleN" type="number" min="1" max="30" step="1" value="2"></label>
-            </div>
-          </details>
-
-          <details class="advanced level-guide-details" open>
-            <summary>Cẩm nang mức ngập xe (Level 0 - 4)</summary>
-            <div class="level-guide-list">
-              <div class="level-guide-item"><span class="level-tag level0">L0</span><div><b>Khô ráo (&lt; 5cm)</b><small>An toàn di chuyển</small></div></div>
-              <div class="level-guide-item"><span class="level-tag level1">L1</span><div><b>Mép lốp (5 - 15cm)</b><small>Ngập nhẹ, giảm tốc</small></div></div>
-              <div class="level-guide-item"><span class="level-tag level2">L2</span><div><b>Nửa bánh (15 - 30cm)</b><small>Nguy cơ chết máy sedan</small></div></div>
-              <div class="level-guide-item"><span class="level-tag level3">L3</span><div><b>Qua bánh (30 - 50cm)</b><small>Cấm xe con &amp; xe máy</small></div></div>
-              <div class="level-guide-item"><span class="level-tag level4">L4</span><div><b>Nắp capo (&gt; 50cm)</b><small>Nguy hiểm khẩn cấp</small></div></div>
-            </div>
-          </details>
-        </section>
-
-        <section class="panel">
-          <div class="panel-title">
-            <div>
-              <span class="step">3</span>
-              <h2>Alert channels</h2>
-            </div>
-          </div>
-          <div id="alertChannels" class="channel-list"><span class="chip">Dashboard</span></div>
-        </section>
-
-        <div id="analysisError" class="error-box hidden"></div>
-      </aside>
-
-      <section class="main-column">
-        <section class="panel media-panel">
-          <div class="media-head">
-            <div>
-              <h2>Detection view</h2>
-              <p id="mediaSubtitle">Upload a video to begin.</p>
-            </div>
-            <div class="header-badges">
-              <span id="liveLevel" class="level-badge-tag neutral hidden">Level --</span>
-              <span id="liveSeverity" class="severity-badge safe">SAFE</span>
-            </div>
-          </div>
-          <div class="media-stage">
-            <video id="videoPlayer" controls playsinline></video>
-            <div id="emptyState" class="empty-state">
-              <strong>No video loaded</strong>
-              <span>The same display size is kept for every input resolution.</span>
-            </div>
-            <div id="progressOverlay" class="progress-overlay hidden">
-              <div class="progress-card">
-                <div class="progress-row"><span id="progressText">Starting analysis</span><b id="progressPercent">0%</b></div>
-                <div class="progress-track"><div id="progressBar"></div></div>
-                <div id="liveMetric" class="live-metric">Waiting for first inference frame...</div>
-              </div>
-            </div>
-          </div>
-        </section>
-
-        <section id="resultSection" class="results hidden">
-          <div class="metric-grid">
-            <article class="metric-card"><span>Highest severity</span><strong id="highestSeverity">--</strong></article>
-            <article class="metric-card"><span>Max flooded area</span><strong id="maxRatio">--</strong></article>
-            <article class="metric-card"><span>Mức ngập cao nhất</span><strong id="highestLevel">--</strong></article>
-            <article class="metric-card"><span>Mức ngập phổ biến</span><strong id="dominantLevel">--</strong></article>
-            <article class="metric-card"><span>Alerts created</span><strong id="alertCount">--</strong></article>
-          </div>
-
-          <div class="analysis-split">
-            <!-- BẢNG 1: FLOODED AREA TIMELINE -->
-            <section class="panel chart-panel">
-              <div class="panel-title simple">
-                <div>
-                  <h2>Flooded-area timeline</h2>
-                  <small class="muted" style="margin-left: 6px;">(Tỷ lệ diện tích ngập %)</small>
-                </div>
-                <span id="analysisMeta" class="muted"></span>
-              </div>
-              <canvas id="timelineChart" height="230"></canvas>
-            </section>
-
-            <!-- BẢNG 2: BẢNG MỨC ĐỘ NGẬP (BEST_FLOOD_LEVEL_MODEL) CẠNH BẢNG FLOOD AREA -->
-            <section class="panel level-panel">
-              <div class="panel-title simple">
-                <div>
-                  <h2>Bảng mức độ ngập xe</h2>
-                  <small class="muted" style="margin-left: 6px;">(best_flood_level_model)</small>
-                </div>
-                <span id="levelBadgeSummary" class="level-badge-tag neutral">Level --</span>
-              </div>
-              <div class="level-panel-body">
-                <div class="level-table-wrap">
-                  <table class="level-table">
-                    <thead>
-                      <tr>
-                        <th>Cấp độ</th>
-                        <th>Độ sâu ngập</th>
-                        <th>Phân bố</th>
-                        <th>Tỷ lệ</th>
-                      </tr>
-                    </thead>
-                    <tbody id="levelTableBody">
-                      <tr><td colspan="4" class="text-center muted">Chưa có dữ liệu</td></tr>
-                    </tbody>
-                  </table>
-                </div>
-                <div id="levelAdvisory" class="level-advisory">
-                  <!-- Traffic / Vehicle safety advisory text -->
-                </div>
-              </div>
-            </section>
-          </div>
-        </section>
-
-        <div class="two-column">
-          <section class="panel table-panel">
-            <div class="panel-title simple"><h2>Recent alerts</h2><button id="refreshAlerts" class="text-btn">Refresh</button></div>
-            <div id="alertsList" class="list-empty">No alerts yet.</div>
-          </section>
-          <section class="panel table-panel">
-            <div class="panel-title simple"><h2>Analysis history</h2><button id="refreshHistory" class="text-btn">Refresh</button></div>
-            <div id="historyList" class="list-empty">No completed analyses yet.</div>
-          </section>
         </div>
       </section>
-    </main>
-  </div>
-  <script src="/static/app.js"></script>
+
+      <section id="resultSection" class="results hidden">
+        <div class="metric-grid">
+          <article class="metric-card"><span>Highest severity</span><strong id="highestSeverity">--</strong></article>
+          <article class="metric-card"><span>Max flooded area</span><strong id="maxRatio">--</strong></article>
+          <article class="metric-card"><span>Mức ngập cao nhất</span><strong id="highestLevel">--</strong></article>
+          <article class="metric-card"><span>Mức ngập phổ biến</span><strong id="dominantLevel">--</strong></article>
+          <article class="metric-card"><span>Alerts created</span><strong id="alertCount">--</strong></article>
+        </div>
+
+        <div class="analysis-split">
+          <!-- TIMELINE 1: FLOODED AREA TIMELINE -->
+          <section class="panel chart-panel">
+            <div class="panel-title simple">
+              <div>
+                <h2>Flooded-area timeline</h2>
+                <small class="muted" style="margin-left: 6px;">(Tỷ lệ diện tích ngập %)</small>
+              </div>
+              <span id="analysisMeta" class="muted"></span>
+            </div>
+            <canvas id="timelineChart" height="230"></canvas>
+          </section>
+
+          <!-- TIMELINE 2: FLOOD LEVEL TIMELINE (BEST_FLOOD_LEVEL_MODEL) CẠNH TIMELINE FLOOD AREA -->
+          <section class="panel chart-panel">
+            <div class="panel-title simple">
+              <div>
+                <h2>Timeline mức độ ngập</h2>
+                <small class="muted" style="margin-left: 6px;">(best_flood_level_model)</small>
+              </div>
+              <span id="levelBadgeSummary" class="level-badge-tag neutral">Level --</span>
+            </div>
+            <canvas id="levelTimelineChart" height="230"></canvas>
+          </section>
+        </div>
+
+        <!-- BẢNG PHÂN BỐ MỨC ĐỘ NGẬP XE (BEST_FLOOD_LEVEL_MODEL) & KHUYẾN CÁO -->
+        <section class="panel level-panel">
+          <div class="panel-title simple">
+            <div>
+              <h2>Phân bố mức độ ngập xe &amp; Khuyến cáo</h2>
+              <small class="muted" style="margin-left: 6px;">(best_flood_level_model)</small>
+            </div>
+            <span id="dominantLevelBadge" class="level-badge-tag neutral">Dominant: --</span>
+          </div>
+          <div class="level-panel-body">
+            <div class="level-table-wrap">
+              <table class="level-table">
+                <thead>
+                <tr>
+                  <th>Cấp độ</th>
+                  <th>Mô tả trạng thái</th>
+                  <th>Độ sâu ngập</th>
+                  <th>Phân bố thời lượng</th>
+                  <th>Tỷ lệ</th>
+                </tr>
+                </thead>
+                <tbody id="levelTableBody">
+                <tr><td colspan="5" class="text-center muted">Chưa có dữ liệu</td></tr>
+                </tbody>
+              </table>
+            </div>
+            <div id="levelAdvisory" class="level-advisory">
+              <!-- Traffic / Vehicle safety advisory text -->
+            </div>
+          </div>
+        </section>
+      </section>
+
+      <div class="two-column">
+        <section class="panel table-panel">
+          <div class="panel-title simple"><h2>Recent alerts</h2><button id="refreshAlerts" class="text-btn">Refresh</button></div>
+          <div id="alertsList" class="list-empty">No alerts yet.</div>
+        </section>
+        <section class="panel table-panel">
+          <div class="panel-title simple"><h2>Analysis history</h2><button id="refreshHistory" class="text-btn">Refresh</button></div>
+          <div id="historyList" class="list-empty">No completed analyses yet.</div>
+        </section>
+      </div>
+    </section>
+  </main>
+</div>
+<script src="/static/app.js"></script>
 </body>
 </html>

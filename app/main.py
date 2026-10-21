@@ -140,6 +140,7 @@ def index() -> str:
 def health() -> dict[str, Any]:
     model_path = _active_model_path()
     info = segmenter.info() if segmenter is not None else None
+    clf = get_level_classifier()
     return {
         "ok": model_path.exists(),
         "app": settings.app_name,
@@ -159,7 +160,7 @@ def health() -> dict[str, Any]:
         "alert_confirm_frames": settings.alert_confirm_frames,
         "alert_cooldown_sec": settings.alert_cooldown_sec,
         "alert_channels": alert_manager.configured_channels(),
-        "level_model": None if level_clf is None else level_clf.info(),
+        "level_model": None if clf is None else clf.info(),
         "level_error": level_error,
         "level_info": LEVEL_INFO,
     }
@@ -167,11 +168,11 @@ def health() -> dict[str, Any]:
 
 @app.post("/api/upload")
 async def upload_video(
-    file: UploadFile = File(...),
-    sample_every_n_frames: int = Form(default=2, ge=1, le=30),
-    low_ratio: Optional[float] = Form(default=None, ge=0.0, le=1.0),
-    moderate_ratio: Optional[float] = Form(default=None, ge=0.0, le=1.0),
-    critical_ratio: Optional[float] = Form(default=None, ge=0.0, le=1.0),
+        file: UploadFile = File(...),
+        sample_every_n_frames: int = Form(default=2, ge=1, le=30),
+        low_ratio: Optional[float] = Form(default=None, ge=0.0, le=1.0),
+        moderate_ratio: Optional[float] = Form(default=None, ge=0.0, le=1.0),
+        critical_ratio: Optional[float] = Form(default=None, ge=0.0, le=1.0),
 ) -> dict[str, Any]:
     """Upload a video and immediately start automatic flood analysis."""
     suffix = Path(file.filename or "video.mp4").suffix.lower()
@@ -283,7 +284,7 @@ def process_video(job_id: str, req: AnalysisRequest) -> None:
     cap = None
     try:
         seg = get_segmenter()
-        level_clf_local = get_level_classifier() 
+        level_clf_local = get_level_classifier()
         thresholds = _thresholds(req)
         video_path = find_video(req.video_id)
         cap = cv2.VideoCapture(str(video_path))
@@ -307,7 +308,7 @@ def process_video(job_id: str, req: AnalysisRequest) -> None:
         alerts: list[dict[str, Any]] = []
         alerted_severities: set[str] = set()
         previous_ratio: float | None = None
-        previous_level_probs = None 
+        previous_level_probs = None
         level_counts: Counter = Counter()
         last_mask: Any = None
         last_metrics: FrameMetrics | None = None
@@ -352,11 +353,16 @@ def process_video(job_id: str, req: AnalysisRequest) -> None:
                         "level_confidence": round(metrics.level_confidence, 4),
                     })
 
-                # Trigger alerts based on area severity OR vehicle flood level (Level2, Level3, Level4)
+                # Trigger alerts based on area severity OR vehicle flood level (Level1-4 from best_flood_level_model)
                 severity_alert = at_least(metrics.severity, settings.alert_min_severity)
+                min_lvl = "Level1" if settings.alert_min_severity == "LOW" else "Level2"
                 level_alert = (
-                    metrics.level in ("Level2", "Level3", "Level4")
-                    and metrics.level_confidence >= 0.40
+                        metrics.level in ("Level1", "Level2", "Level3", "Level4")
+                        and (
+                                metrics.level in ("Level2", "Level3", "Level4")
+                                or (metrics.level == "Level1" and min_lvl == "Level1")
+                        )
+                        and metrics.level_confidence >= 0.35
                 )
 
                 if severity_alert or level_alert:
@@ -367,8 +373,8 @@ def process_video(job_id: str, req: AnalysisRequest) -> None:
                         current_alert_severity = alert_state_key
                         alert_streak = 1
                     if (
-                        alert_streak >= settings.alert_confirm_frames
-                        and alert_state_key not in alerted_severities
+                            alert_streak >= settings.alert_confirm_frames
+                            and alert_state_key not in alerted_severities
                     ):
                         alert = _record_alert(job_id, metrics, time_sec)
                         alerts.append(alert)
