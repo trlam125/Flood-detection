@@ -6,7 +6,7 @@ import time
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Optional
 
 import cv2
 import imageio.v2 as imageio
@@ -20,6 +20,9 @@ from .database import Database
 from .inference import FrameMetrics, analyze_frame, annotate_frame
 from .model import Segmenter, create_segmenter
 from .severity import SeverityThresholds, at_least, max_severity
+
+from collections import Counter
+from .level_classifier import LEVEL_ENABLED, LEVEL_EMA_ALPHA, LEVEL_INFO, LevelClassifier, create_level_classifier, get_level_info
 
 app = FastAPI(title=settings.app_name, version="6.0")
 app.mount("/static", StaticFiles(directory=BASE_DIR / "app" / "static"), name="static")
@@ -59,9 +62,9 @@ VIDEO_EXTENSIONS = {".mp4", ".mov", ".avi", ".mkv", ".m4v"}
 class AnalysisRequest:
     video_id: str
     sample_every_n_frames: int = 2
-    low_ratio: float | None = None
-    moderate_ratio: float | None = None
-    critical_ratio: float | None = None
+    low_ratio: Optional[float] = None
+    moderate_ratio: Optional[float] = None
+    critical_ratio: Optional[float] = None
 
 
 def get_segmenter() -> Segmenter:
@@ -79,6 +82,26 @@ def get_segmenter() -> Segmenter:
             segmenter_error = str(exc)
             raise HTTPException(status_code=503, detail=segmenter_error) from exc
 
+level_clf: LevelClassifier | None = None
+level_error: str | None = None
+level_checked = False
+level_lock = threading.Lock()
+
+
+def get_level_classifier() -> LevelClassifier | None:
+    global level_clf, level_error, level_checked
+    if level_checked:
+        return level_clf
+    with level_lock:
+        if level_checked:
+            return level_clf
+        if LEVEL_ENABLED:
+            try:
+                level_clf = create_level_classifier()
+            except Exception as exc:
+                level_error = str(exc)
+        level_checked = True
+        return level_clf
 
 def _active_model_path() -> Path:
     return settings.yolo_model_path if settings.model_backend == "yolo" else settings.model_path
@@ -136,6 +159,9 @@ def health() -> dict[str, Any]:
         "alert_confirm_frames": settings.alert_confirm_frames,
         "alert_cooldown_sec": settings.alert_cooldown_sec,
         "alert_channels": alert_manager.configured_channels(),
+        "level_model": None if level_clf is None else level_clf.info(),
+        "level_error": level_error,
+        "level_info": LEVEL_INFO,
     }
 
 
@@ -143,9 +169,9 @@ def health() -> dict[str, Any]:
 async def upload_video(
     file: UploadFile = File(...),
     sample_every_n_frames: int = Form(default=2, ge=1, le=30),
-    low_ratio: float | None = Form(default=None, ge=0.0, le=1.0),
-    moderate_ratio: float | None = Form(default=None, ge=0.0, le=1.0),
-    critical_ratio: float | None = Form(default=None, ge=0.0, le=1.0),
+    low_ratio: Optional[float] = Form(default=None, ge=0.0, le=1.0),
+    moderate_ratio: Optional[float] = Form(default=None, ge=0.0, le=1.0),
+    critical_ratio: Optional[float] = Form(default=None, ge=0.0, le=1.0),
 ) -> dict[str, Any]:
     """Upload a video and immediately start automatic flood analysis."""
     suffix = Path(file.filename or "video.mp4").suffix.lower()
@@ -224,6 +250,8 @@ def _record_alert(job_id: str, metrics: FrameMetrics, time_sec: float) -> dict[s
         severity=metrics.severity,
         water_ratio=metrics.water_ratio,
         time_sec=time_sec,
+        level=metrics.level,
+        level_confidence=metrics.level_confidence,
     )
     dispatch = alert_manager.dispatch(payload)
     channels = [name for name, result in dispatch.items() if name != "cooldown" and isinstance(result, dict)]
@@ -235,12 +263,16 @@ def _record_alert(job_id: str, metrics: FrameMetrics, time_sec: float) -> dict[s
         message=payload.message,
         channels=channels,
         dispatch=dispatch,
+        level=metrics.level,
+        level_confidence=metrics.level_confidence,
     )
     return {
         "id": alert_id,
         "severity": metrics.severity,
         "water_ratio": metrics.water_ratio,
         "time_sec": time_sec,
+        "level": metrics.level,
+        "level_confidence": metrics.level_confidence,
         "message": payload.message,
         "dispatch": dispatch,
     }
@@ -251,6 +283,7 @@ def process_video(job_id: str, req: AnalysisRequest) -> None:
     cap = None
     try:
         seg = get_segmenter()
+        level_clf_local = get_level_classifier() 
         thresholds = _thresholds(req)
         video_path = find_video(req.video_id)
         cap = cv2.VideoCapture(str(video_path))
@@ -274,6 +307,8 @@ def process_video(job_id: str, req: AnalysisRequest) -> None:
         alerts: list[dict[str, Any]] = []
         alerted_severities: set[str] = set()
         previous_ratio: float | None = None
+        previous_level_probs = None 
+        level_counts: Counter = Counter()
         last_mask: Any = None
         last_metrics: FrameMetrics | None = None
         current_alert_severity: str | None = None
@@ -287,12 +322,16 @@ def process_video(job_id: str, req: AnalysisRequest) -> None:
             do_infer = frame_idx % req.sample_every_n_frames == 0 or last_metrics is None
             if do_infer:
                 mask, metrics = analyze_frame(
-                    seg,
-                    frame,
-                    thresholds,
+                    seg, frame, thresholds,
                     previous_ratio=previous_ratio,
                     ema_alpha=settings.ema_alpha,
+                    level_clf=level_clf_local,
+                    previous_level_probs=previous_level_probs,
+                    level_alpha=LEVEL_EMA_ALPHA,
                 )
+                previous_level_probs = metrics.level_probs
+                if metrics.level:
+                    level_counts[metrics.level] += 1
                 previous_ratio = metrics.water_ratio
                 last_mask = mask
                 last_metrics = metrics
@@ -309,21 +348,31 @@ def process_video(job_id: str, req: AnalysisRequest) -> None:
                         "raw_water_ratio": round(metrics.raw_water_ratio, 5),
                         "severity": metrics.severity,
                         "confidence": round(metrics.confidence, 4),
+                        "level": metrics.level,
+                        "level_confidence": round(metrics.level_confidence, 4),
                     })
 
-                if at_least(metrics.severity, settings.alert_min_severity):
-                    if metrics.severity == current_alert_severity:
+                # Trigger alerts based on area severity OR vehicle flood level (Level2, Level3, Level4)
+                severity_alert = at_least(metrics.severity, settings.alert_min_severity)
+                level_alert = (
+                    metrics.level in ("Level2", "Level3", "Level4")
+                    and metrics.level_confidence >= 0.40
+                )
+
+                if severity_alert or level_alert:
+                    alert_state_key = f"{metrics.severity}:{metrics.level or 'NO_CAR'}"
+                    if alert_state_key == current_alert_severity:
                         alert_streak += 1
                     else:
-                        current_alert_severity = metrics.severity
+                        current_alert_severity = alert_state_key
                         alert_streak = 1
                     if (
                         alert_streak >= settings.alert_confirm_frames
-                        and metrics.severity not in alerted_severities
+                        and alert_state_key not in alerted_severities
                     ):
                         alert = _record_alert(job_id, metrics, time_sec)
                         alerts.append(alert)
-                        alerted_severities.add(metrics.severity)
+                        alerted_severities.add(alert_state_key)
                 else:
                     current_alert_severity = None
                     alert_streak = 0
@@ -343,6 +392,8 @@ def process_video(job_id: str, req: AnalysisRequest) -> None:
                     live={
                         "severity": None if last_metrics is None else last_metrics.severity,
                         "water_ratio": None if last_metrics is None else last_metrics.water_ratio,
+                        "level": None if last_metrics is None else last_metrics.level,
+                        "level_confidence": None if last_metrics is None else last_metrics.level_confidence,
                     },
                 )
 
@@ -352,6 +403,61 @@ def process_video(job_id: str, req: AnalysisRequest) -> None:
         if writer is not None:
             writer.close()
             writer = None
+
+        # Calculate highest & dominant flood levels from best_flood_level_model
+        level_ranks = {"Level0": 0, "Level1": 1, "Level2": 2, "Level3": 3, "Level4": 4}
+        highest_level = None
+        highest_rank = -1
+        dominant_level = None
+        max_cnt = -1
+
+        for lvl, cnt in level_counts.items():
+            if lvl in level_ranks:
+                if level_ranks[lvl] > highest_rank:
+                    highest_rank = level_ranks[lvl]
+                    highest_level = lvl
+            if cnt > max_cnt:
+                max_cnt = cnt
+                dominant_level = lvl
+
+        if highest_level is None and "NO_CAR" in level_counts:
+            highest_level = "NO_CAR"
+        if dominant_level is None:
+            dominant_level = highest_level or "NO_CAR"
+
+        # Build structured level breakdown for the table
+        total_level_frames = sum(level_counts.values()) or 1
+        level_breakdown = []
+        for lvl in ["Level0", "Level1", "Level2", "Level3", "Level4"]:
+            cnt = level_counts.get(lvl, 0)
+            info = get_level_info(lvl)
+            level_breakdown.append({
+                "level": lvl,
+                "title": info.get("title", lvl),
+                "short_title": info.get("short_title", lvl),
+                "desc": info.get("desc", ""),
+                "depth": info.get("depth", ""),
+                "severity": info.get("severity", "SAFE"),
+                "color": info.get("color", "#4da7f3"),
+                "advisory": info.get("advisory", ""),
+                "count": cnt,
+                "percent": round(cnt * 100.0 / total_level_frames, 1),
+            })
+        if "NO_CAR" in level_counts and level_counts["NO_CAR"] > 0:
+            cnt = level_counts["NO_CAR"]
+            info = get_level_info("NO_CAR")
+            level_breakdown.append({
+                "level": "NO_CAR",
+                "title": info.get("title", "NO_CAR"),
+                "short_title": info.get("short_title", "No Car"),
+                "desc": info.get("desc", ""),
+                "depth": "--",
+                "severity": "NEUTRAL",
+                "color": "#8ea2b6",
+                "advisory": info.get("advisory", ""),
+                "count": cnt,
+                "percent": round(cnt * 100.0 / total_level_frames, 1),
+            })
 
         result = {
             "analysis_id": job_id,
@@ -366,6 +472,9 @@ def process_video(job_id: str, req: AnalysisRequest) -> None:
             "max_water_ratio": max_ratio,
             "mean_water_ratio": ratio_sum / max(1, analyzed_frames),
             "highest_severity": highest,
+            "highest_level": highest_level,
+            "dominant_level": dominant_level,
+            "level_breakdown": level_breakdown,
             "timeline": timeline,
             "alerts": alerts,
             "alert_count": len(alerts),
@@ -376,6 +485,9 @@ def process_video(job_id: str, req: AnalysisRequest) -> None:
                 "critical": thresholds.critical,
             },
             "sample_every_n_frames": req.sample_every_n_frames,
+            "level_counts": dict(level_counts),
+            "level_model": None if level_clf_local is None else level_clf_local.info(),
+            "level_info": LEVEL_INFO,
         }
         db.finish_analysis(job_id, result)
         update_job(job_id, status="done", progress=100.0, processed_frames=frame_idx, result=result)

@@ -9,6 +9,7 @@ from typing import Any
 from urllib import parse, request
 
 from .config import Settings
+from .level_classifier import LEVEL_INFO, get_level_info
 
 
 @dataclass(frozen=True)
@@ -17,13 +18,23 @@ class AlertPayload:
     severity: str
     water_ratio: float
     time_sec: float
+    level: str | None = None
+    level_confidence: float = 0.0
 
     @property
     def message(self) -> str:
+        level_part = ""
+        if self.level and self.level != "NO_CAR":
+            info = get_level_info(self.level)
+            conf_str = f" ({self.level_confidence * 100:.0f}%)" if self.level_confidence > 0 else ""
+            level_part = f" | Mức ngập xe: {self.level} - {info.get('desc')} [{info.get('depth')}]{conf_str}."
+        elif self.level == "NO_CAR":
+            level_part = " | (Chưa phát hiện xe)."
+
         return (
-            f"Flood alert: {self.severity}. "
-            f"Estimated flooded area: {self.water_ratio * 100:.1f}% of frame. "
-            f"Video time: {self.time_sec:.1f}s. Analysis: {self.analysis_id}."
+            f"CẢNH BÁO NGẬP LỤT: [{self.severity}]{level_part} "
+            f"Diện tích ngập: {self.water_ratio * 100:.1f}% khung hình tại {self.time_sec:.1f}s. "
+            f"Mã phân tích: {self.analysis_id}."
         )
 
 

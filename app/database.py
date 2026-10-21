@@ -47,12 +47,23 @@ class Database:
                     time_sec REAL,
                     message TEXT NOT NULL,
                     channels TEXT NOT NULL,
-                    dispatch_json TEXT
+                    dispatch_json TEXT,
+                    level TEXT,
+                    level_confidence REAL DEFAULT 0.0
                 );
                 CREATE INDEX IF NOT EXISTS idx_analyses_created ON analyses(created_at DESC);
                 CREATE INDEX IF NOT EXISTS idx_alerts_created ON alerts(created_at DESC);
                 """
             )
+            # Automatic column migration for existing databases
+            try:
+                con.execute("ALTER TABLE alerts ADD COLUMN level TEXT")
+            except Exception:
+                pass
+            try:
+                con.execute("ALTER TABLE alerts ADD COLUMN level_confidence REAL DEFAULT 0.0")
+            except Exception:
+                pass
 
     def start_analysis(self, analysis_id: str, video_id: str) -> None:
         with self._lock, self._connect() as con:
@@ -100,16 +111,19 @@ class Database:
         message: str,
         channels: list[str],
         dispatch: dict[str, Any],
+        level: str | None = None,
+        level_confidence: float = 0.0,
     ) -> int:
         with self._lock, self._connect() as con:
             cur = con.execute(
                 """
-                INSERT INTO alerts(created_at, analysis_id, severity, water_ratio, time_sec, message, channels, dispatch_json)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO alerts(created_at, analysis_id, severity, water_ratio, time_sec, message, channels, dispatch_json, level, level_confidence)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     time.time(), analysis_id, severity, water_ratio, time_sec, message,
                     json.dumps(channels), json.dumps(dispatch, ensure_ascii=False),
+                    level, level_confidence,
                 ),
             )
             return int(cur.lastrowid)
@@ -127,7 +141,7 @@ class Database:
         limit = max(1, min(200, int(limit)))
         with self._connect() as con:
             rows = con.execute(
-                "SELECT id, created_at, analysis_id, severity, water_ratio, time_sec, message, channels, dispatch_json FROM alerts ORDER BY created_at DESC LIMIT ?",
+                "SELECT id, created_at, analysis_id, severity, water_ratio, time_sec, message, channels, dispatch_json, level, level_confidence FROM alerts ORDER BY created_at DESC LIMIT ?",
                 (limit,),
             ).fetchall()
         result = []
