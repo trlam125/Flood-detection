@@ -60,8 +60,8 @@ data/*.sqlite3
 logs/
 
 # Large model weights (do not commit trained weights)
-models/*.pth
-models/*.pt
+//models/*.pth
+//models/*.pt
 !models/README.md
 
 # Temporary, backup, and editor swap files
