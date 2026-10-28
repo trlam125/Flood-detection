@@ -1,132 +1,531 @@
 <!doctype html>
-<html lang="en">
+<html lang="vi">
 <head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>RIWA FloodEye Monitor</title>
-  <link rel="stylesheet" href="/static/style.css">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>FloodEye · Giám sát ngập tự động</title>
+<link rel="stylesheet" href="/static/style.css?v=__ASSET_VERSION__">
 </head>
 <body>
-  <div class="app-shell">
-    <header class="topbar">
-      <div>
-        <div class="eyebrow">AUTOMATIC FLOOD DETECTION</div>
-        <h1>RIWA FloodEye Monitor</h1>
-        <p>Water segmentation, flooded-area severity and automatic alerts. No manual calibration.</p>
-      </div>
-      <div class="system-state">
-        <span id="modelBadge" class="badge neutral">Checking model</span>
-        <span id="deviceBadge" class="badge neutral">Device --</span>
-      </div>
-    </header>
-
-    <main class="layout">
-      <aside class="side-column">
-        <section class="panel upload-panel">
-          <div class="panel-title">
+<div class="app-shell">
+<header class="topbar">
+<div>
+<div class="eyebrow">GIÁM SÁT NGẬP TỰ ĐỘNG</div>
+<h1>FloodEye<span class="brand-dot">.</span>
+</h1>
+<p>Chọn nguồn. Theo dõi kết quả tự động.</p>
+</div>
+<div class="system-state">
+<span id="modelBadge" class="badge neutral">Đang kiểm tra AI</span>
+<span id="deviceBadge" class="badge neutral">Thiết bị --</span>
+</div>
+</header>
+<nav class="workspace-tabs" aria-label="Chức năng chính">
+<button type="button" data-workspace="video" aria-current="page">Phân tích video</button>
+<button type="button" data-workspace="camera">Camera trực tiếp</button>
+<button type="button" data-workspace="history">Lịch sử &amp; cảnh báo</button>
+<button type="button" data-workspace="settings">Thiết lập</button>
+<button type="button" data-workspace="operations">Vận hành</button>
+</nav>
+<div id="analysisError" class="error-box hidden" role="alert">
+</div>
+<main>
+<section id="workspace-video" class="workspace">
+<div class="workspace-intro">
+<div>
+<h2>Chọn video, xem kết quả ngay trong lúc đọc.</h2>
+<p>AI tự nhận diện nước và xác nhận mức cảnh báo theo thời gian.</p>
+</div>
+<span class="auto-tag">Tự động phân tích</span>
+</div>
+<div class="layout">
+<aside class="side-column">
+<section class="panel upload-panel">
+<label id="dropZone" class="drop-zone" for="videoFile">
+<input id="videoFile" type="file" accept="video/*,.mkv,.avi,.m4v" hidden>
+<span class="upload-symbol" aria-hidden="true">&#8593;</span>
+<strong>Chọn video</strong>
+<span>hoặc kéo thả file vào đây</span>
+<small>MP4 · MOV · AVI · MKV · M4V</small>
+</label>
+<div id="uploadInfo" class="upload-info hidden">
+</div>
+<p id="originalProgress" class="help-text hidden">
+</p>
+<button id="cancelAnalysis" type="button" class="action-button secondary hidden">Dừng phân tích</button>
+<details class="advanced">
+<summary>Tùy chọn video</summary>
+<div class="camera-fields">
+<label>Vùng theo dõi<select id="videoCameraSelect">
+<option value="">Toàn khung hình (mặc định)</option>
+</select>
+</label>
+<label>Đọc một khung mỗi (giây)<input id="previewInterval" type="number" min="0.01" max="5" step="any" value="0.5">
+</label>
+<p class="help-text">Khoảng lấy mẫu áp dụng riêng cho AI. Video có tốc độ phát riêng.</p>
+<label>Cách đọc<select id="videoReadMode">
+<option value="auto">Tự động · phân tích trong lúc đọc</option>
+<option value="upload">Tương thích · tải toàn bộ file lên trước</option>
+</select>
+</label>
+<label class="preview-option">
+<input id="exportVideo" type="checkbox"> Lưu thêm video kết quả ở nền</label>
+<p class="help-text">Bạn vẫn xem được kết quả ngay khi không chọn lưu video.</p>
+</div>
+</details>
+</section>
+<section class="panel quick-guide">
+<h3>Chỉ cần chọn file</h3>
+<ol>
+<li>Chọn video muốn kiểm tra.</li>
+<li>Xem video và chỉ số tự cập nhật.</li>
+<li>Xem tổng hợp khi phân tích xong.</li>
+</ol>
+<p class="help-text">“Chưa xác định” nghĩa là hệ thống chưa đủ dữ liệu để xác nhận mức ngập.</p>
+</section>
+</aside>
+<div class="main-column">
+<section class="panel media-panel">
+          <div class="media-head">
             <div>
-              <span class="step">1</span>
-              <h2>Video source</h2>
+              <h2>Kết quả phân tích</h2>
+              <p id="mediaSubtitle">Chọn video để hệ thống bắt đầu tự động.</p>
             </div>
           </div>
-          <label id="dropZone" class="drop-zone" for="videoFile">
-            <input id="videoFile" type="file" accept="video/*" hidden>
-            <strong>Choose or drop a flood video</strong>
-            <span>MP4, MOV, AVI, MKV, M4V</span>
-          </label>
-          <div id="uploadInfo" class="upload-info hidden"></div>
+          <div class="media-stage">
+            <video id="videoPlayer" controls playsinline>
+</video>
+            <canvas id="segmentationOverlay" aria-hidden="true"></canvas>
+            <img id="previewImage" alt="Latest analysed frame from the selected video">
+            <div id="emptyState" class="empty-state">
+              <strong>Chọn video để bắt đầu</strong>
+              <span>Bạn không cần bấm thêm nút phân tích.</span>
+            </div>
+          </div>
+          <div class="observation-panel" aria-label="Video observations">
+            <p id="playbackNote" class="help-text playback-note"></p>
+            <div class="observation-grid">
+              <div>
+<span class="observation-label">Mức đã xác nhận</span>
+<span id="liveSeverity" class="severity-badge unknown">Chưa xác định</span>
+</div>
+              <div>
+<span id="videoWaterLabel" class="observation-label">Diện tích nước · toàn ảnh</span>
+<strong id="videoWater">--</strong>
+</div>
+              <div>
+<span class="observation-label" title="Độ tin cậy phân đoạn ảnh, không phải xác suất xảy ra ngập">Độ tin cậy AI</span>
+<strong id="videoConfidence">--</strong>
+</div>
+            </div>
+            <p id="liveMetric" class="observation-note">Kết quả sẽ cập nhật tại đây trong lúc đọc video.</p>
+            <details id="analysisSnapshotPanel" class="analysis-snapshot hidden">
+              <summary id="analysisSnapshotTime">Ảnh AI mới nhất</summary>
+              <p class="help-text">Ảnh lấy mẫu riêng cho AI. Mốc ảnh có thể khác vị trí video đang phát.</p>
+              <img id="analysisSnapshot" alt="Ảnh phân tích AI gần nhất với vùng nước được đánh dấu">
+            </details>
+            <div id="analysisProgress" class="analysis-progress hidden" role="status">
+              <div class="progress-row">
+<span id="progressText">Starting analysis</span>
+<b id="progressPercent">0%</b>
+</div>
+              <div class="progress-track">
+<div id="progressBar">
+</div>
+</div>
+            </div>
+            <a id="downloadResult" class="action-button secondary hidden" download>Tải video kết quả</a>
+          </div>
         </section>
+<section id="resultSection" class="results hidden">
+          <div class="metric-grid">
+            <article class="metric-card">
+<span>Mức cao nhất đã xác nhận</span>
+<strong id="highestSeverity">--</strong>
+</article>
+            <article class="metric-card">
+<span>Diện tích nước lớn nhất</span>
+<strong id="maxRatio">--</strong>
+</article>
+            <article class="metric-card">
+<span>Diện tích nước trung bình</span>
+<strong id="meanRatio">--</strong>
+</article>
+            <article class="metric-card">
+<span>Cảnh báo đã tạo</span>
+<strong id="alertCount">--</strong>
+</article>
+          </div>
+          <p id="stateSummary" class="help-text">
+</p>
 
-        <section class="panel">
+          <details class="panel chart-panel">
+<summary>Xem diễn biến theo thời gian</summary>
+            <div class="panel-title simple">
+<h2>Diễn biến diện tích nước</h2>
+<span id="analysisMeta" class="muted">
+</span>
+</div>
+            <canvas id="timelineChart" height="220">
+</canvas>
+          </details>
+        </section>
+</div>
+</div>
+</section>
+<section id="workspace-camera" class="workspace" hidden>
+<div class="workspace-intro">
+<div>
+<h2>Theo dõi liên tục, cảnh báo tự động.</h2>
+<p>Kết nối camera một lần, hệ thống tự đọc hình ảnh và theo dõi thay đổi.</p>
+</div>
+<button type="button" class="action-button secondary" data-open-setup>Thiết lập camera</button>
+</div>
+<section class="panel live-camera-panel">
+          <div class="media-head">
+<div>
+<h2>Giám sát camera</h2>
+<p id="liveCameraName">Chọn camera đã lưu hoặc thêm camera mới.</p>
+</div>
+</div>
+          <div class="camera-picker">
+<label for="quickCameraSelect">Camera của bạn</label>
+<select id="quickCameraSelect">
+<option value="">Chọn camera</option>
+</select>
+<button type="button" class="text-btn" data-open-setup>+ Thêm camera</button>
+</div>
+<div id="liveCameraList" class="live-camera-list">
+</div>
+          <div class="live-camera-stage">
+<img id="cameraLiveImage" alt="Latest monitored camera image" hidden>
+<p id="liveCameraEmpty" class="help-text">Kết nối camera một lần. Hệ thống sẽ tự theo dõi liên tục.</p>
+</div>
+          <div class="observation-panel" aria-label="Camera observations">
+            <div class="observation-grid">
+              <div>
+<span class="observation-label">Mức đã xác nhận</span>
+<span id="cameraLiveSeverity" class="severity-badge unknown">Chưa xác định</span>
+</div>
+              <div>
+<span id="cameraWaterLabel" class="observation-label">Diện tích nước · toàn ảnh</span>
+<strong id="cameraWater">--</strong>
+</div>
+              <div>
+<span class="observation-label" title="Model confidence for segmentation, not a probability of flooding">Độ tin cậy AI</span>
+<strong id="cameraConfidence">--</strong>
+</div>
+            </div>
+            <p id="cameraObservationNote" class="observation-note">Chưa có dữ liệu camera.</p>
+          </div>
+          <div class="live-camera-body">
+            <div class="button-row">
+              <span id="cameraConnection" class="badge neutral">Chưa kết nối</span>
+              <button id="startLive" type="button" class="action-button">Bắt đầu giám sát</button>
+              <button id="stopLive" type="button" class="action-button secondary">Dừng</button>
+              <button id="restartLive" type="button" class="action-button secondary">Áp dụng cấu hình mới</button>
+              <button id="liveRoiReference" type="button" class="action-button secondary">Chọn vùng theo dõi</button>
+            </div>
+            <p id="liveCameraMetrics" class="help-text" role="status">Chưa có dữ liệu camera.</p>
+            <p id="liveCameraConfig" class="help-text">
+</p>
+            <p id="liveCameraError" class="help-text" role="status">
+</p>
+          </div>
+        </section>
+</section>
+<section id="workspace-history" class="workspace" hidden>
+<div class="workspace-intro">
+<div>
+<h2>Lịch sử &amp; cảnh báo</h2>
+<p>Xem các sự kiện đã xác nhận và kết quả những lần phân tích trước.</p>
+</div>
+</div>
+<div class="main-column">
+<section class="panel table-panel">
+          <div class="panel-title simple">
+<h2>Sự kiện cảnh báo</h2>
+<button id="refreshEvents" class="text-btn">Làm mới</button>
+</div>
+          <div id="eventsList" class="list-empty">Chưa có sự kiện cảnh báo.</div>
+        </section>
+<details class="secondary-details">
+<summary>Chi tiết gửi thông báo</summary>
+<section class="panel table-panel">
+          <div class="panel-title simple">
+<h2>Gửi thông báo</h2>
+<button id="refreshDeliveries" class="text-btn">Làm mới</button>
+</div>
+          <p id="deliverySummary" class="help-text delivery-summary" role="status">Checking persistent notification queue...</p>
+          <p class="help-text delivery-summary">Accepted means the provider accepted the request. Failed or blocked messages hold later messages for the same camera and channel. Retry after fixing the cause, or skip a message to release the queue.</p>
+          <div id="deliveriesList" class="list-empty">No external notifications queued.</div>
+        </section>
+</details>
+<div class="two-column">
+<section class="panel table-panel">
+            <div class="panel-title simple">
+<h2>Cảnh báo gần đây</h2>
+<button id="refreshAlerts" class="text-btn">Làm mới</button>
+</div>
+            <div id="alertsList" class="list-empty">Chưa có cảnh báo.</div>
+          </section>
+<section class="panel table-panel">
+            <div class="panel-title simple">
+<h2>Lịch sử phân tích</h2>
+<button id="refreshHistory" class="text-btn">Làm mới</button>
+</div>
+            <div id="historyList" class="list-empty">Chưa có phiên phân tích.</div>
+          </section>
+</div>
+</div>
+</section>
+<section id="workspace-settings" class="workspace" hidden>
+<div class="workspace-intro">
+<div>
+<h2>Thiết lập một lần</h2>
+<p>Video dùng ngay với cấu hình mặc định. Camera cần lưu kết nối trước khi giám sát.</p>
+</div>
+</div>
+<div class="settings-grid">
+<section class="panel camera-panel">
+          <div class="panel-title">
+<div>
+<h2>Camera và vùng theo dõi</h2>
+</div>
+</div>
+          <form id="cameraForm" class="camera-fields">
+            <label>Camera đã lưu<select id="cameraSelect">
+<option value="">Toàn khung hình (mặc định)</option>
+</select>
+</label>
+            <label>Tên camera<input id="cameraName" maxlength="100" placeholder="e.g. Road entrance" required>
+</label>
+            <label>Vị trí<input id="cameraLocation" maxlength="200" placeholder="Street or monitoring point">
+</label>
+            <p id="roiSummary" class="help-text">Water coverage is measured across the full frame.</p>
+            <div class="button-row">
+              <label class="action-button" for="roiReferenceFile">Chọn ảnh/video để vẽ vùng</label>
+              <input id="roiReferenceFile" type="file" accept="image/*,video/*" hidden>
+              <button id="useFullFrame" type="button" class="action-button secondary">Dùng toàn khung hình</button>
+            </div>
+            <p class="help-text">Choose a reference from the same fixed camera view. Set thresholds below, then save the profile before uploading.</p>
+            <div class="button-row">
+              <button id="newCamera" type="button" class="action-button secondary">Tạo mới</button>
+              <button id="reloadCamera" type="button" class="action-button secondary">Tải lại</button>
+              <button id="saveCamera" type="submit" class="action-button">Lưu camera</button>
+            </div>
+            <p id="cameraSaveState" class="help-text" role="status">No saved camera selected.</p>
+          </form>
+        </section>
+<section class="panel camera-panel">
+          <div class="panel-title">
+<h2>Kết nối camera</h2>
+</div>
+          <form id="sourceForm" class="camera-fields">
+            <p class="help-text">Lưu và chọn camera trước, sau đó thiết lập kết nối tại đây.</p>
+            <label>Loại kết nối<select id="sourceKind">
+<option value="rtsp">Camera IP (RTSP)</option>
+<option value="webcam">Webcam / USB nối với server</option>
+</select>
+</label>
+            <label id="rtspSourceField">Tên biến RTSP trong .env<input id="rtspEnv" placeholder="CAMERA_ROAD_RTSP" maxlength="64" pattern="[A-Z][A-Z0-9_]{0,63}">
+</label>
+            <label id="webcamSourceField" class="hidden">Số thiết bị trên server<input id="webcamIndex" type="number" min="0" max="16" step="1" value="0">
+</label>
+            <p class="help-text">Đặt URL RTSP trong file .env rồi khởi động lại server. Ở đây chỉ nhập tên biến, không nhập mật khẩu camera. Webcam là thiết bị nối với server.</p>
+            <div class="field-grid">
+              <label>Phân tích mỗi (giây)<input id="sourceInterval" type="number" min="0.1" max="30" step="any" value="1">
+</label>
+              <label>Ảnh hết hạn sau (giây)<input id="sourceStale" type="number" min="0.5" max="120" step="any" value="5">
+</label>
+            </div>
+            <details class="advanced">
+<summary>Tùy chọn kết nối và thông báo</summary>
+              <div class="field-grid">
+                <label>Chờ kết nối tối đa (giây)<input id="sourceOpenTimeout" type="number" min="1" max="60" step="any" value="10">
+</label>
+                <label>Chờ đọc tối đa (giây)<input id="sourceReadTimeout" type="number" min="1" max="60" step="any" value="5">
+</label>
+              </div>
+              <label class="preview-option">
+<input id="sourceAutoStart" type="checkbox"> Tự tiếp tục giám sát khi server khởi động lại</label>
+              <label class="preview-option">
+<input id="sourceExternal" type="checkbox"> Gửi cảnh báo đến các kênh đã cấu hình</label>
+            </details>
+            <div class="button-row">
+              <button id="saveSource" type="submit" class="action-button">Lưu kết nối</button>
+              <button id="reloadSource" type="button" class="action-button secondary">Tải lại kết nối</button>
+            </div>
+            <p id="sourceSaveState" class="help-text" role="status">Select a saved camera profile.</p>
+          </form>
+        </section>
+<section class="panel">
           <div class="panel-title">
             <div>
               <span class="step">2</span>
-              <h2>Automatic severity</h2>
+              <h2>Ngưỡng cảnh báo nâng cao</h2>
             </div>
           </div>
           <div class="severity-legend">
-            <div><span class="dot safe"></span><b>SAFE</b><small id="safeText">below 10%</small></div>
-            <div><span class="dot low"></span><b>LOW</b><small id="lowText">10-20%</small></div>
-            <div><span class="dot moderate"></span><b>MODERATE</b><small id="moderateText">20-45%</small></div>
-            <div><span class="dot critical"></span><b>CRITICAL</b><small id="criticalText">45%+</small></div>
+            <div>
+<span class="dot safe">
+</span>
+<b>SAFE</b>
+<small id="safeText">below 10%</small>
+</div>
+            <div>
+<span class="dot low">
+</span>
+<b>LOW</b>
+<small id="lowText">10-20%</small>
+</div>
+            <div>
+<span class="dot moderate">
+</span>
+<b>MODERATE</b>
+<small id="moderateText">20-45%</small>
+</div>
+            <div>
+<span class="dot critical">
+</span>
+<b>CRITICAL</b>
+<small id="criticalText">45%+</small>
+</div>
           </div>
 
           <details class="advanced">
-            <summary>Advanced thresholds</summary>
+            <summary>Điều chỉnh ngưỡng</summary>
             <div class="field-grid">
-              <label>Low (%)<input id="lowRatio" type="number" min="0" max="100" step="1" value="10"></label>
-              <label>Moderate (%)<input id="moderateRatio" type="number" min="0" max="100" step="1" value="20"></label>
-              <label>Critical (%)<input id="criticalRatio" type="number" min="0" max="100" step="1" value="45"></label>
-              <label>Sample every N frames<input id="sampleN" type="number" min="1" max="30" step="1" value="2"></label>
+              <label>Low (%)<input id="lowRatio" type="number" min="0" max="100" step="any" value="10">
+</label>
+              <label>Moderate (%)<input id="moderateRatio" type="number" min="0" max="100" step="any" value="20">
+</label>
+              <label>Critical (%)<input id="criticalRatio" type="number" min="0" max="100" step="any" value="45">
+</label>
+              <label>Server upload: sample every N frames<input id="sampleN" type="number" min="1" max="30" step="1" value="2" title="Used when immediate local reading is off or browser decoding is unavailable">
+</label>
             </div>
           </details>
+          <details class="advanced">
+            <summary>Thời gian xác nhận và nhắc lại</summary>
+            <div class="field-grid">
+              <label>Xác nhận tăng mức (giây)<input id="confirmSec" type="number" min="0" max="600" step="any" value="3">
+</label>
+              <label>Xác nhận giảm mức (giây)<input id="clearSec" type="number" min="0" max="3600" step="any" value="10">
+</label>
+              <label>Nhắc lại (giây, 0 = tắt)<input id="reminderSec" type="number" min="0" max="86400" step="any" value="300">
+</label>
+              <label>Biên giảm mức (%)<input id="hysteresisRatio" type="number" min="0" max="100" step="any" value="3">
+</label>
+              <label>Khoảng mất dữ liệu tối đa (giây)<input id="maxGapSec" type="number" min="0.01" max="3600" step="any" value="5">
+</label>
+              <label>Thời gian làm mượt (giây)<input id="emaTauSec" type="number" min="0.01" max="60" step="any" value="1">
+</label>
+              <label>Gửi cảnh báo từ mức<select id="alertMinimum">
+<option value="LOW">Mức thấp</option>
+<option value="MODERATE" selected>Ngập vừa</option>
+<option value="CRITICAL">Nguy hiểm</option>
+</select>
+</label>
+            </div>
+            <p class="help-text">Video uses clip time; live cameras use elapsed observation time. Lưu camera changes, then restart live monitoring to apply them.</p>
+          </details>
         </section>
-
-        <section class="panel">
+<section class="panel">
           <div class="panel-title">
             <div>
               <span class="step">3</span>
-              <h2>Alert channels</h2>
+              <h2>Kênh nhận cảnh báo</h2>
             </div>
           </div>
-          <div id="alertChannels" class="channel-list"><span class="chip">Dashboard</span></div>
+          <div id="alertChannels" class="channel-list">
+<span class="chip">Dashboard</span>
+</div>
+          <p id="replayModeNote" class="help-text">Video replay notifications appear on the dashboard.</p>
         </section>
-
-        <div id="analysisError" class="error-box hidden"></div>
-      </aside>
-
-      <section class="main-column">
-        <section class="panel media-panel">
+</div>
+</section>
+<section id="workspace-operations" class="workspace" hidden>
+<div class="workspace-intro">
+<div>
+<h2>Vận hành hệ thống</h2>
+<p>Kiểm tra kết nối, dung lượng và công việc đang chạy.</p>
+</div>
+</div>
+<section class="panel operations-panel">
           <div class="media-head">
-            <div>
-              <h2>Detection view</h2>
-              <p id="mediaSubtitle">Upload a video to begin.</p>
-            </div>
-            <span id="liveSeverity" class="severity-badge safe">SAFE</span>
-          </div>
-          <div class="media-stage">
-            <video id="videoPlayer" controls playsinline></video>
-            <div id="emptyState" class="empty-state">
-              <strong>No video loaded</strong>
-              <span>The same display size is kept for every input resolution.</span>
-            </div>
-            <div id="progressOverlay" class="progress-overlay hidden">
-              <div class="progress-card">
-                <div class="progress-row"><span id="progressText">Starting analysis</span><b id="progressPercent">0%</b></div>
-                <div class="progress-track"><div id="progressBar"></div></div>
-                <div id="liveMetric" class="live-metric">Waiting for first inference frame...</div>
-              </div>
-            </div>
+<div>
+<h2>Tình trạng hệ thống</h2>
+<p id="operationsReadiness">Đang kiểm tra hệ thống…</p>
+</div>
+<span id="operationsStatus" class="badge neutral">Checking</span>
+</div>
+          <div class="operations-body">
+            <div id="operationsMetrics" class="metric-grid">
+</div>
+            <p id="operationsIssues" class="help-text" role="status">
+</p>
+            <div id="operationsCameras" class="help-text">
+</div>
+            <div id="storageCapacity" class="storage-disks">
+</div>
+            <svg id="operationsTrend" viewBox="0 0 600 75" role="img" aria-label="Recent number of cameras with fresh confirmed observations">
+</svg>
+            <p id="operationsTrendNote" class="help-text">
+</p>
+            <details class="advanced">
+<summary>Media retention &amp; restore</summary>
+              <p id="retentionSummary" class="help-text">
+</p>
+              <p class="help-text">Only expired, database-owned media is archived. Running sessions, open live events and pending notifications are protected. Permanent purge requires server opt-in.</p>
+              <div class="button-row">
+<button id="refreshStorage" type="button" class="action-button secondary">Refresh preview</button>
+<button id="maintainStorage" type="button" class="action-button secondary">Archive expired media</button>
+</div>
+              <div id="retentionHistory" class="delivery-list">
+</div>
+            </details>
           </div>
         </section>
+</section>
+</main>
+</div>  <dialog id="roiDialog" aria-labelledby="roiTitle">
+    <div class="roi-editor">
+      <h2 id="roiTitle">Choose the monitored region</h2>
+      <p class="help-text">Click at least 3 corners around the road or area to monitor. The last edge closes automatically. Avoid crossing edges.</p>
+      <canvas id="roiCanvas" aria-label="Reference image; click to add polygon vertices">
+</canvas>
+      <p id="roiEditorStatus" class="help-text" role="status">
+</p>
+      <div class="button-row">
+        <button id="undoRoiPoint" type="button" class="action-button secondary">Undo point</button>
+        <button id="clearRoiPoints" type="button" class="action-button secondary">Clear points</button>
+        <button id="cancelRoi" type="button" class="action-button secondary">Cancel</button>
+        <button id="applyRoi" type="button" class="action-button">Use region</button>
+      </div>
+      <p class="help-text">Save the camera profile after choosing the region. Restart active live monitoring to apply the new region.</p>
+    </div>
+  </dialog>
+  <dialog id="eventDialog" aria-labelledby="eventTitle">
+    <div class="roi-editor">
+      <h2 id="eventTitle">Alert event history</h2>
+      <p id="eventTimeNote" class="help-text">Video events use clip time. Live events show local observation time.</p>
+      <div id="eventDetail">
+</div>
+      <button id="closeEvent" type="button" class="action-button">Close</button>
+    </div>
+  </dialog>
 
-        <section id="resultSection" class="results hidden">
-          <div class="metric-grid">
-            <article class="metric-card"><span>Highest severity</span><strong id="highestSeverity">--</strong></article>
-            <article class="metric-card"><span>Max flooded area</span><strong id="maxRatio">--</strong></article>
-            <article class="metric-card"><span>Mean flooded area</span><strong id="meanRatio">--</strong></article>
-            <article class="metric-card"><span>Alerts created</span><strong id="alertCount">--</strong></article>
-          </div>
-
-          <section class="panel chart-panel">
-            <div class="panel-title simple"><h2>Flooded-area timeline</h2><span id="analysisMeta" class="muted"></span></div>
-            <canvas id="timelineChart" height="220"></canvas>
-          </section>
-        </section>
-
-        <div class="two-column">
-          <section class="panel table-panel">
-            <div class="panel-title simple"><h2>Recent alerts</h2><button id="refreshAlerts" class="text-btn">Refresh</button></div>
-            <div id="alertsList" class="list-empty">No alerts yet.</div>
-          </section>
-          <section class="panel table-panel">
-            <div class="panel-title simple"><h2>Analysis history</h2><button id="refreshHistory" class="text-btn">Refresh</button></div>
-            <div id="historyList" class="list-empty">No completed analyses yet.</div>
-          </section>
-        </div>
-      </section>
-    </main>
-  </div>
-  <script src="/static/app.js"></script>
+<script src="/static/workflow.js?v=__ASSET_VERSION__">
+</script>
+<script src="/static/playback.js?v=__ASSET_VERSION__"></script>
+<script src="/static/preview.js?v=__ASSET_VERSION__">
+</script>
+<script src="/static/live.js?v=__ASSET_VERSION__">
+</script>
+<script src="/static/operations.js?v=__ASSET_VERSION__">
+</script>
+<script src="/static/app.js?v=__ASSET_VERSION__">
+</script>
 </body>
 </html>

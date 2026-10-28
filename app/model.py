@@ -20,6 +20,22 @@ class Segmenter(Protocol):
     def info(self) -> Dict[str, Any]: ...
 
 
+def resolve_device(preference: str | None = None) -> torch.device:
+    preference = (preference if preference is not None else os.getenv("MODEL_DEVICE", "auto")).strip().lower()
+    if preference not in {"auto", "cpu", "cuda"}:
+        raise ValueError("MODEL_DEVICE must be auto, cpu or cuda")
+    if preference == "cuda" and not torch.cuda.is_available():
+        raise RuntimeError("MODEL_DEVICE=cuda but CUDA is unavailable. Install a CUDA-enabled PyTorch build or use MODEL_DEVICE=auto/cpu.")
+    return torch.device("cuda" if preference != "cpu" and torch.cuda.is_available() else "cpu")
+
+
+def acceleration_info() -> Dict[str, Any]:
+    available = torch.cuda.is_available()
+    return {"requested_device": os.getenv("MODEL_DEVICE", "auto").strip().lower(),
+            "cuda_available": available, "gpu_name": torch.cuda.get_device_name(0) if available else None,
+            "torch_version": str(torch.__version__), "cuda_build": torch.version.cuda}
+
+
 class ConvBlock(nn.Module):
     def __init__(self, in_channels: int, out_channels: int):
         super().__init__()
@@ -85,13 +101,13 @@ class UNetResNet34(nn.Module):
 class RIWASegmenter:
     backend = "riwa"
 
-    def __init__(self, model_path: str | os.PathLike[str]):
+    def __init__(self, model_path: str | os.PathLike[str], device: str | None = None):
         self.model_path = Path(model_path)
         if not self.model_path.exists():
             raise FileNotFoundError(
                 f"Model not found: {self.model_path}. Put riwa_unet_resnet34_deploy.pth in models/."
             )
-        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        self.device = resolve_device(device)
         checkpoint = torch.load(self.model_path, map_location=self.device)
         if not isinstance(checkpoint, dict) or "model_state_dict" not in checkpoint:
             raise ValueError("Expected RIWA deploy checkpoint with model_state_dict and preprocessing metadata")
@@ -130,6 +146,7 @@ class RIWASegmenter:
             "backend": self.backend,
             "architecture": self.architecture,
             "device": str(self.device),
+            "device_name": torch.cuda.get_device_name(self.device) if self.device.type == "cuda" else "CPU",
             "img_size": self.img_size,
             "threshold": self.threshold,
             "model_path": str(self.model_path),
@@ -140,7 +157,7 @@ class RIWASegmenter:
 class YOLOWaterSegmenter:
     backend = "yolo"
 
-    def __init__(self, model_path: str | os.PathLike[str], threshold: float = 0.25):
+    def __init__(self, model_path: str | os.PathLike[str], threshold: float = 0.25, device: str | None = None):
         self.model_path = Path(model_path)
         if not self.model_path.exists():
             raise FileNotFoundError(f"YOLO segmentation model not found: {self.model_path}")
@@ -148,7 +165,7 @@ class YOLOWaterSegmenter:
 
         self.model = YOLO(str(self.model_path))
         self.threshold = float(threshold)
-        self.device = 0 if torch.cuda.is_available() else "cpu"
+        self.device = 0 if resolve_device(device).type == "cuda" else "cpu"
 
     def predict_mask(self, frame_bgr: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
         h, w = frame_bgr.shape[:2]
@@ -170,7 +187,8 @@ class YOLOWaterSegmenter:
         return {
             "backend": self.backend,
             "architecture": "Ultralytics segmentation",
-            "device": str(self.device),
+            "device": "cuda:0" if self.device == 0 else "cpu",
+            "device_name": torch.cuda.get_device_name(0) if self.device == 0 else "CPU",
             "threshold": self.threshold,
             "model_path": str(self.model_path),
         }
@@ -191,10 +209,10 @@ def _clean_binary(mask: np.ndarray) -> np.ndarray:
     return cleaned
 
 
-def create_segmenter(backend: str, riwa_path: Path, yolo_path: Path) -> Segmenter:
+def create_segmenter(backend: str, riwa_path: Path, yolo_path: Path, device: str | None = None) -> Segmenter:
     backend = backend.strip().lower()
     if backend == "riwa":
-        return RIWASegmenter(riwa_path)
+        return RIWASegmenter(riwa_path, device=device)
     if backend == "yolo":
-        return YOLOWaterSegmenter(yolo_path)
+        return YOLOWaterSegmenter(yolo_path, device=device)
     raise ValueError("MODEL_BACKEND must be 'riwa' or 'yolo'")
