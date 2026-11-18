@@ -54,8 +54,10 @@ data/*.db
 data/*.db-journal
 data/*.db-shm
 data/*.db-wal
+data/*.runtime.lock
 data/*.sqlite
 data/*.sqlite3
+data/evaluation/
 *.log
 logs/
 

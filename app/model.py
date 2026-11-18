@@ -17,7 +17,24 @@ class Segmenter(Protocol):
     threshold: float
 
     def predict_mask(self, frame_bgr: np.ndarray) -> tuple[np.ndarray, np.ndarray]: ...
+    def predict_road_mask(self, frame_bgr: np.ndarray) -> np.ndarray: ...
     def info(self) -> Dict[str, Any]: ...
+
+
+def resolve_device(preference: str | None = None) -> torch.device:
+    preference = (preference if preference is not None else os.getenv("MODEL_DEVICE", "auto")).strip().lower()
+    if preference not in {"auto", "cpu", "cuda"}:
+        raise ValueError("MODEL_DEVICE must be auto, cpu or cuda")
+    if preference == "cuda" and not torch.cuda.is_available():
+        raise RuntimeError("MODEL_DEVICE=cuda but CUDA is unavailable. Install a CUDA-enabled PyTorch build or use MODEL_DEVICE=auto/cpu.")
+    return torch.device("cuda" if preference != "cpu" and torch.cuda.is_available() else "cpu")
+
+
+def acceleration_info() -> Dict[str, Any]:
+    available = torch.cuda.is_available()
+    return {"requested_device": os.getenv("MODEL_DEVICE", "auto").strip().lower(),
+            "cuda_available": available, "gpu_name": torch.cuda.get_device_name(0) if available else None,
+            "torch_version": str(torch.__version__), "cuda_build": torch.version.cuda}
 
 
 class ConvBlock(nn.Module):
@@ -85,13 +102,13 @@ class UNetResNet34(nn.Module):
 class RIWASegmenter:
     backend = "riwa"
 
-    def __init__(self, model_path: str | os.PathLike[str]):
+    def __init__(self, model_path: str | os.PathLike[str], device: str | None = None):
         self.model_path = Path(model_path)
         if not self.model_path.exists():
             raise FileNotFoundError(
                 f"Model not found: {self.model_path}. Put riwa_unet_resnet34_deploy.pth in models/."
             )
-        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        self.device = resolve_device(device)
         checkpoint = torch.load(self.model_path, map_location=self.device)
         if not isinstance(checkpoint, dict) or "model_state_dict" not in checkpoint:
             raise ValueError("Expected RIWA deploy checkpoint with model_state_dict and preprocessing metadata")
@@ -130,6 +147,7 @@ class RIWASegmenter:
             "backend": self.backend,
             "architecture": self.architecture,
             "device": str(self.device),
+            "device_name": torch.cuda.get_device_name(self.device) if self.device.type == "cuda" else "CPU",
             "img_size": self.img_size,
             "threshold": self.threshold,
             "model_path": str(self.model_path),
@@ -140,7 +158,7 @@ class RIWASegmenter:
 class YOLOWaterSegmenter:
     backend = "yolo"
 
-    def __init__(self, model_path: str | os.PathLike[str], threshold: float = 0.25):
+    def __init__(self, model_path: str | os.PathLike[str], threshold: float = 0.25, device: str | None = None):
         self.model_path = Path(model_path)
         if not self.model_path.exists():
             raise FileNotFoundError(f"YOLO segmentation model not found: {self.model_path}")
@@ -148,7 +166,7 @@ class YOLOWaterSegmenter:
 
         self.model = YOLO(str(self.model_path))
         self.threshold = float(threshold)
-        self.device = 0 if torch.cuda.is_available() else "cpu"
+        self.device = 0 if resolve_device(device).type == "cuda" else "cpu"
 
     def predict_mask(self, frame_bgr: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
         h, w = frame_bgr.shape[:2]
@@ -170,10 +188,84 @@ class YOLOWaterSegmenter:
         return {
             "backend": self.backend,
             "architecture": "Ultralytics segmentation",
-            "device": str(self.device),
+            "device": "cuda:0" if self.device == 0 else "cpu",
+            "device_name": torch.cuda.get_device_name(0) if self.device == 0 else "CPU",
             "threshold": self.threshold,
             "model_path": str(self.model_path),
         }
+
+
+class CityscapesRoadSegmenter:
+    """Pretrained SegFormer semantic road mask for each frame."""
+    backend = "segformer-road"
+
+    def __init__(self, model_id: str, device: torch.device):
+        try:
+            from transformers import SegformerForSemanticSegmentation, SegformerImageProcessor
+        except ImportError as exc:
+            raise RuntimeError("Road detection requires transformers; install project requirements.txt") from exc
+        self.model_id = model_id
+        self.device = device
+        try:
+            self.processor = SegformerImageProcessor.from_pretrained(model_id, local_files_only=True)
+            self.model = SegformerForSemanticSegmentation.from_pretrained(model_id, local_files_only=True).to(device)
+        except OSError:
+            self.processor = SegformerImageProcessor.from_pretrained(model_id)
+            self.model = SegformerForSemanticSegmentation.from_pretrained(model_id).to(device)
+        self.model.eval()
+        labels = self.model.config.id2label
+        self.road_class_id = next((int(key) for key, value in labels.items() if str(value).strip().lower() == "road"), None)
+        if self.road_class_id is None:
+            raise ValueError(f"Road class is missing from semantic model {model_id}")
+
+    @torch.inference_mode()
+    def predict_road_mask(self, frame_bgr: np.ndarray) -> np.ndarray:
+        rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
+        original_height, original_width = rgb.shape[:2]
+        size = self.processor.size
+        target_height = int(size.get("height", 640)) if isinstance(size, dict) else int(size)
+        target_width = int(size.get("width", target_height)) if isinstance(size, dict) else int(size)
+        scale = min(target_width / original_width, target_height / original_height)
+        resized_width = max(1, round(original_width * scale))
+        resized_height = max(1, round(original_height * scale))
+        resized = cv2.resize(rgb, (resized_width, resized_height), interpolation=cv2.INTER_LINEAR)
+        left = (target_width - resized_width) // 2
+        top = (target_height - resized_height) // 2
+        canvas = np.zeros((target_height, target_width, 3), dtype=np.uint8)
+        canvas[top:top + resized_height, left:left + resized_width] = resized
+        inputs = self.processor(images=canvas, return_tensors="pt")
+        inputs = {key: value.to(self.device) for key, value in inputs.items()}
+        logits = self.model(**inputs).logits
+        logits = F.interpolate(logits, size=(target_height, target_width), mode="bilinear", align_corners=False)
+        labels = logits.argmax(dim=1)[0].cpu().numpy()
+        road = labels[top:top + resized_height, left:left + resized_width] == self.road_class_id
+        return cv2.resize(road.astype(np.uint8), (original_width, original_height),
+                          interpolation=cv2.INTER_NEAREST).astype(bool)
+
+    def info(self) -> Dict[str, Any]:
+        return {"backend": self.backend, "model_id": self.model_id,
+                "class": "road", "device": str(self.device)}
+
+
+class RIWAWithRoadSegmenter:
+    """RIWA detects water; SegFormer supplies the road-area denominator."""
+    backend = "riwa+segformer-road"
+
+    def __init__(self, water: RIWASegmenter, road: CityscapesRoadSegmenter):
+        self.water = water
+        self.road = road
+        self.threshold = water.threshold
+        self.device = water.device
+
+    def predict_mask(self, frame_bgr: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+        return self.water.predict_mask(frame_bgr)
+
+    def predict_road_mask(self, frame_bgr: np.ndarray) -> np.ndarray:
+        return self.road.predict_road_mask(frame_bgr)
+
+    def info(self) -> Dict[str, Any]:
+        return {"backend": self.backend, "device": str(self.device),
+                "water_model": self.water.info(), "road_model": self.road.info()}
 
 
 def _clean_binary(mask: np.ndarray) -> np.ndarray:
@@ -191,10 +283,13 @@ def _clean_binary(mask: np.ndarray) -> np.ndarray:
     return cleaned
 
 
-def create_segmenter(backend: str, riwa_path: Path, yolo_path: Path) -> Segmenter:
+def create_segmenter(backend: str, riwa_path: Path, yolo_path: Path, device: str | None = None,
+                     road_model_id: str | None = None) -> Segmenter:
     backend = backend.strip().lower()
     if backend == "riwa":
-        return RIWASegmenter(riwa_path)
+        water = RIWASegmenter(riwa_path, device=device)
+        road = CityscapesRoadSegmenter(road_model_id or "nvidia/segformer-b0-finetuned-cityscapes-640-1280", water.device)
+        return RIWAWithRoadSegmenter(water, road)
     if backend == "yolo":
-        return YOLOWaterSegmenter(yolo_path)
+        return YOLOWaterSegmenter(yolo_path, device=device)
     raise ValueError("MODEL_BACKEND must be 'riwa' or 'yolo'")
