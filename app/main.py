@@ -13,9 +13,10 @@ from typing import Any
 from urllib.parse import urlsplit
 
 import cv2
+import shutil, tempfile, os
 import imageio.v2 as imageio
 from fastapi import FastAPI, File, Form, HTTPException, Query, Request, UploadFile, WebSocket, WebSocketDisconnect
-from fastapi.responses import HTMLResponse, Response, StreamingResponse
+from fastapi.responses import HTMLResponse, Response, StreamingResponse, FileResponse
 from fastapi.staticfiles import StaticFiles
 
 from .alerts import AlertManager, AlertPayload
@@ -111,7 +112,7 @@ VIDEO_EXTENSIONS = {".mp4", ".mov", ".avi", ".mkv", ".m4v"}
 @dataclass(frozen=True)
 class AnalysisRequest:
     video_id: str
-    sample_every_n_frames: int = 2
+    sample_every_n_frames: int = 1
     low_ratio: float | None = None
     moderate_ratio: float | None = None
     critical_ratio: float | None = None
@@ -165,7 +166,8 @@ def get_segmenter() -> Segmenter:
             return segmenter
         try:
             segmenter = create_segmenter(settings.model_backend, settings.model_path, settings.yolo_model_path,
-                                         road_model_id=settings.road_model_id)
+                                         road_model_id=settings.road_model_id,
+                                         ade_model_id=settings.ade_model_id)
             segmenter_error = None
             return segmenter
         except Exception as exc:
@@ -271,7 +273,7 @@ def health() -> dict[str, Any]:
 @app.post("/api/upload")
 async def upload_video(
     file: UploadFile = File(...),
-    sample_every_n_frames: int | None = Form(default=None, ge=1, le=30),
+    sample_every_n_frames: int | None = Form(default=None, ge=1, le=60),
     low_ratio: float | None = Form(default=None, ge=0.0, le=1.0),
     moderate_ratio: float | None = Form(default=None, ge=0.0, le=1.0),
     critical_ratio: float | None = Form(default=None, ge=0.0, le=1.0),
@@ -438,14 +440,20 @@ def process_video(job_id: str, req: AnalysisRequest) -> None:
                 if elapsed is not None and elapsed > policy.max_gap_sec:
                     previous_ratio = None
                 with inference_lock:
-                    road_mask = seg.predict_road_mask(frame)
-                    road_mask = road_footprint.update(frame, road_mask)
+                    # analyze_frame calls predict_mask first, then predict_road_mask.
+                    # This order is critical for RIWAWithRoadSegmenter: predict_mask
+                    # populates _last_water_mask so predict_road_mask can expand the
+                    # road corridor to include water-covered pavement.
                     mask, metrics = analyze_frame(
                         seg, frame, thresholds, previous_ratio=previous_ratio, roi_mask=roi_mask,
                         elapsed_sec=elapsed if elapsed and elapsed > 0 else None,
                         ema_time_constant_sec=policy.ema_time_constant_sec,
-                        road_mask=road_mask,
+                        road_mask=None,
                     )
+                    # predict_road_mask was already called inside analyze_frame;
+                    # calling it again is cheap (cached in RIWAWithRoadSegmenter).
+                    road_mask = seg.predict_road_mask(frame)
+                    road_mask = road_footprint.update(frame, road_mask)
                 previous_ratio = metrics.water_ratio
                 previous_inference_time = time_sec
                 previous_time = time_sec
@@ -814,6 +822,16 @@ def job_status(job_id: str) -> dict[str, Any]:
             raise HTTPException(status_code=404, detail="Job not found")
         return dict(job)
 
+
+@app.get("/api/jobs/{job_id}/download")
+def download_job_output(job_id: str) -> FileResponse:
+    """Download the annotated video for a completed analysis job.
+    The video is saved as `<job_id>_annotated.mp4` in the output directory.
+    """
+    output_path = settings.output_dir / f"{job_id}_annotated.mp4"
+    if not output_path.is_file():
+        raise HTTPException(status_code=404, detail="Annotated video not found for this job")
+    return FileResponse(str(output_path), media_type="video/mp4", filename=output_path.name)
 
 @app.get("/api/history")
 def history(limit: int = 20) -> dict[str, Any]:

@@ -70,12 +70,14 @@ def analyze_frame(
     ema_time_constant_sec: float = 1.0,
     road_mask: np.ndarray | None = None,
 ) -> tuple[np.ndarray, FrameMetrics]:
+    # 1. Water mask (also populates _last_water_mask in RIWAWithRoadSegmenter)
     mask, probability = segmenter.predict_mask(frame_bgr)
     if mask.shape != frame_bgr.shape[:2] or probability.shape != mask.shape:
         raise ValueError("Segmentation output does not match the video frame")
     if not np.isfinite(probability).all():
         raise ValueError("Segmentation probabilities contain invalid values")
     full_ratio = float(np.mean(mask > 0))
+    # 2. Road mask – call AFTER predict_mask so water-expansion is applied
     if road_mask is None:
         road_predictor = getattr(segmenter, "predict_road_mask", None)
         if road_predictor is None:

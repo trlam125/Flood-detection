@@ -32,7 +32,7 @@ class PreviewOptions(BaseModel):
     model_config = ConfigDict(extra="forbid", allow_inf_nan=False)
     camera_id: str | None = Field(default=None, min_length=1, max_length=64)
     camera_revision: int | None = Field(default=None, ge=1)
-    sample_every_n_frames: int | None = Field(default=None, ge=1, le=30)
+    sample_every_n_frames: int | None = Field(default=None, ge=1, le=60)
     low_ratio: float | None = Field(default=None, ge=0, le=1)
     moderate_ratio: float | None = Field(default=None, ge=0, le=1)
     critical_ratio: float | None = Field(default=None, ge=0, le=1)

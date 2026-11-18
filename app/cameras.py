@@ -24,7 +24,7 @@ class CameraConfiguration(BaseModel):
     name: str = Field(min_length=1, max_length=100)
     location: str = Field(default="", max_length=200)
     thresholds: CameraThresholds = Field(default_factory=CameraThresholds)
-    sample_every_n_frames: int = Field(default=2, ge=1, le=30)
+    sample_every_n_frames: int = Field(default=1, ge=1, le=60)
     roi: list[tuple[float, float]] | None = Field(default=None, min_length=3, max_length=32)
     reference_width: int | None = Field(default=None, ge=2, le=32768)
     reference_height: int | None = Field(default=None, ge=2, le=32768)

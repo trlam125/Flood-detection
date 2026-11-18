@@ -152,8 +152,8 @@ function readAnalysisOptions() {
     throw new Error("Thresholds must satisfy SAFE < LOW < MODERATE < CRITICAL and stay within 0-100%.");
   }
   const sampleEveryN = Number($("sampleN").value);
-  if (!Number.isInteger(sampleEveryN) || sampleEveryN < 1 || sampleEveryN > 30) {
-    throw new Error("Sample every N frames must be an integer between 1 and 30.");
+  if (!Number.isInteger(sampleEveryN) || sampleEveryN < 1 || sampleEveryN > 60) {
+    throw new Error("Sample every N frames must be an integer between 1 and 60.");
   }
   return {
     low,

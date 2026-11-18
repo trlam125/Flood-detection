@@ -42,10 +42,11 @@ class Settings:
     data_dir: Path = BASE_DIR / "data"
     db_path: Path = BASE_DIR / "data" / "flood_monitor.db"
 
-    model_backend: str = "riwa"
-    model_path: Path = Path(os.getenv("RIWA_MODEL_PATH", str(BASE_DIR / "models" / "riwa_unet_resnet34_deploy.pth")))
-    yolo_model_path: Path = Path(os.getenv("YOLO_WATER_MODEL_PATH", str(BASE_DIR / "models" / "water_seg.pt")))
-    road_model_id: str = os.getenv("ROAD_MODEL_ID", "nvidia/segformer-b0-finetuned-cityscapes-640-1280").strip()
+    model_backend: str = os.getenv("MODEL_BACKEND", "riwa").strip().lower()
+    model_path: Path = Path(os.getenv("RIWA_MODEL_PATH", str(BASE_DIR / "models" / "riwa_unet_resnet34_deploy_v2.pth")))
+    yolo_model_path: Path = Path(os.getenv("YOLO_WATER_MODEL_PATH", str(BASE_DIR / "models" / "puddle_yolo(1).pt")))
+    road_model_id: str = os.getenv("ROAD_MODEL_ID", "nvidia/segformer-b5-finetuned-ade-640-640").strip()
+    ade_model_id: str = os.getenv("ADE_MODEL_ID", "nvidia/segformer-b5-finetuned-ade-640-640").strip()
 
     low_ratio: float = float(os.getenv("LOW_RATIO", "0.10"))
     moderate_ratio: float = float(os.getenv("MODERATE_RATIO", "0.20"))
