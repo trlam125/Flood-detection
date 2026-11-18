@@ -201,6 +201,7 @@ class PreviewSession:
                 return {"job_id": self.id, "sequence": sequence, "time_sec": time_sec,
                         "live": {**decision.state(), "water_ratio": metrics.water_ratio, "ratio_scope": metrics.ratio_scope,
                                  "confidence": metrics.confidence, "monitored_pixels": metrics.monitored_pixels,
+                                 "mean_width_ratio": metrics.mean_width_ratio, "max_width_ratio": metrics.max_width_ratio,
                                  "time_sec": time_sec},
                         "original_ready": self.original_ready, "analyzed_frames": self.sample_count,
                         "annotated_jpeg": base64.b64encode(encoded).decode("ascii"),

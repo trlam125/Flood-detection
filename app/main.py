@@ -466,6 +466,8 @@ def process_video(job_id: str, req: AnalysisRequest) -> None:
                         "time_sec": round(time_sec, 2),
                         "water_ratio": round(metrics.water_ratio, 5) if metrics.water_ratio is not None else None,
                         "raw_water_ratio": round(metrics.raw_water_ratio, 5) if metrics.raw_water_ratio is not None else None,
+                        "mean_width_ratio": round(metrics.mean_width_ratio, 5) if metrics.mean_width_ratio is not None else None,
+                        "max_width_ratio": round(metrics.max_width_ratio, 5) if metrics.max_width_ratio is not None else None,
                         **decision.state(),
                         "confidence": round(metrics.confidence, 4),
                         "full_frame_water_ratio": round(metrics.full_frame_water_ratio, 5),

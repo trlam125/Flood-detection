@@ -19,6 +19,45 @@ class FrameMetrics:
     full_frame_water_ratio: float = 0.0
     ratio_scope: str = "road"
     monitored_pixels: int = 0
+    mean_width_ratio: float | None = None
+    max_width_ratio: float | None = None
+
+
+def compute_road_width_flood_metrics(
+    valid_road: np.ndarray,
+    water_on_road: np.ndarray,
+    min_width_px: int = 8,
+) -> tuple[float, float, float]:
+    """
+    Compute flood metrics prioritizing cross-sectional road width.
+    
+    For each horizontal row y where the road is present, we calculate:
+        width_ratio(y) = water_width(y) / road_width(y)
+    
+    Returns:
+        (prioritized_ratio, mean_width_ratio, max_width_ratio)
+        - prioritized_ratio: combined ratio emphasizing road width (70% mean width + 30% max bottleneck blockage)
+        - mean_width_ratio: average percentage of road width covered by water
+        - max_width_ratio: peak bottleneck where water blocks the largest percentage of road width
+    """
+    road_width_per_row = np.sum(valid_road, axis=1)
+    water_width_per_row = np.sum(water_on_road > 0, axis=1)
+
+    valid_rows = road_width_per_row >= min_width_px
+    if not np.any(valid_rows):
+        total_road = int(np.count_nonzero(valid_road))
+        if total_road == 0:
+            return 0.0, 0.0, 0.0
+        ratio = float(np.count_nonzero(water_on_road) / total_road)
+        return ratio, ratio, ratio
+
+    width_ratios = water_width_per_row[valid_rows] / road_width_per_row[valid_rows]
+    mean_w = float(np.mean(width_ratios))
+    max_w = float(np.max(width_ratios))
+
+    # Prioritize road width blockage while factoring in the worst-case bottleneck cross-section
+    prioritized_ratio = float(0.70 * mean_w + 0.30 * max_w)
+    return prioritized_ratio, mean_w, max_w
 
 
 def analyze_frame(
@@ -53,10 +92,10 @@ def analyze_frame(
     monitored_pixels = int(np.count_nonzero(valid))
     if monitored_pixels == 0:
         empty = np.zeros_like(mask, dtype=np.uint8)
-        metrics = FrameMetrics(None, None, "UNKNOWN", 0.0, full_ratio, "road", 0)
+        metrics = FrameMetrics(None, None, "UNKNOWN", 0.0, full_ratio, "road", 0, None, None)
         return empty, metrics
     mask = ((mask > 0) & valid).astype(np.uint8)
-    raw_ratio = float(np.count_nonzero(mask) / monitored_pixels)
+    raw_ratio, mean_w, max_w = compute_road_width_flood_metrics(valid, mask)
     if previous_ratio is None:
         smooth_ratio = raw_ratio
     else:
@@ -71,7 +110,7 @@ def analyze_frame(
         confidence = float(1.0 - np.mean(probability[valid]))
     confidence = max(0.0, min(1.0, confidence))
     return mask, FrameMetrics(raw_ratio, smooth_ratio, severity, confidence, full_ratio,
-                              "road", monitored_pixels)
+                              "road", monitored_pixels, mean_w, max_w)
 
 
 def segmentation_overlay(mask: np.ndarray, roi_mask: np.ndarray | None = None,

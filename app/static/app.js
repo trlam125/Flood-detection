@@ -48,7 +48,7 @@ function renderObservation(kind, state = {}, { available = true, note = "" } = {
   badge.dataset.severity = severity;
   badge.className = `severity-badge ${severityClass(severity)}`;
   $(kind + "WaterLabel").textContent = state.ratio_scope === "road"
-    ? "Nước chiếm mặt đường" : `Tỷ lệ nước · ${state.ratio_scope === "roi" ? "vùng chọn" : "toàn ảnh"}`;
+    ? "Bề rộng đường ngập" : `Tỷ lệ nước · ${state.ratio_scope === "roi" ? "vùng chọn" : "toàn ảnh"}`;
   $(kind + "Water").textContent = pct(available ? state.water_ratio : null);
   $(kind + "Confidence").textContent = pct(available ? state.confidence : null, 0);
   const details = [];
@@ -57,6 +57,7 @@ function renderObservation(kind, state = {}, { available = true, note = "" } = {
     details.push(`Đang xác nhận ${severityLabel(state.pending_severity)}: ${Number(state.pending_elapsed_sec || 0).toFixed(1)}/${Number(state.pending_required_sec || 0).toFixed(1)} giây`);
   }
   if (available && Number.isFinite(state.time_sec)) details.push(`Khung ${state.time_sec.toFixed(1)} giây`);
+  if (available && Number.isFinite(state.max_width_ratio)) details.push(`Điểm nghẽn ngập lớn nhất: ${pct(state.max_width_ratio)}`);
   if (available && state.monitored_pixels === 0) details.push("Không nhận diện được mặt đường trong khung này.");
   if (note) details.push(note);
   $(kind === "video" ? "liveMetric" : "cameraObservationNote").textContent = details.join(" · ") || "Đang chờ dữ liệu…";
